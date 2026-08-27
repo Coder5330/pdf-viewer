@@ -635,9 +635,61 @@ function updateSelectionPreviewFromClientPt(clientX, clientY){
   return pt;
 }
 
+let pageAdvancing = false;
+
+// When a drag-scroll hits the bottom (or top) of the current page's content
+// while still trying to scroll further, move to the next (or previous) page
+// and keep going, so selecting doesn't just stall at the page boundary. The
+// new page's selection restarts from its top (scrolling down) or bottom
+// (scrolling up) rather than carrying the exact word range over — this app
+// shows one page at a time, so a true single continuous cross-page range
+// isn't modeled; this keeps the drag flowing at the page edge instead.
+async function advanceSelectionPage(dir){
+  if(!drawing || !selectMode || pageAdvancing) return;
+  const newIdx = activeIndex + dir;
+  if(newIdx < 0 || newIdx >= pages.length) return;
+  pageAdvancing = true;
+  try{
+    activeIndex = newIdx;
+    await renderActivePage();
+    if(!drawing || !selectMode) return;
+    const p = pages[activeIndex];
+    const words = await ensurePageTextWords(p);
+    if(!drawing || !selectMode) return;
+    selectOrderedWords = sortWordsReadingOrder(words);
+    selectPreviewLines = null;
+    if(selectOrderedWords.length){
+      selectStartIdx = dir > 0 ? 0 : selectOrderedWords.length - 1;
+      textSelectionAnchor = { pageIndex: activeIndex, idx: selectStartIdx };
+    } else {
+      selectStartIdx = -1;
+    }
+    const main = el('main');
+    main.scrollTop = dir > 0 ? 0 : (main.scrollHeight - main.clientHeight);
+    if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
+  } finally {
+    pageAdvancing = false;
+  }
+  if(drawing && selectMode && autoScrollDy !== 0 && autoScrollHandle == null && !pageAdvancing){
+    autoScrollHandle = requestAnimationFrame(autoScrollStep);
+  }
+}
+
 function autoScrollStep(){
   if(!drawing || !selectMode || autoScrollDy === 0){ autoScrollHandle = null; return; }
-  el('main').scrollTop += autoScrollDy;
+  const main = el('main');
+  const maxScroll = main.scrollHeight - main.clientHeight;
+  if(autoScrollDy > 0 && main.scrollTop >= maxScroll - 1){
+    autoScrollHandle = null;
+    advanceSelectionPage(1);
+    return;
+  }
+  if(autoScrollDy < 0 && main.scrollTop <= 1){
+    autoScrollHandle = null;
+    advanceSelectionPage(-1);
+    return;
+  }
+  main.scrollTop += autoScrollDy;
   if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
   autoScrollHandle = requestAnimationFrame(autoScrollStep);
 }
