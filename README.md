@@ -22,3 +22,7 @@ Single-file static HTML app (`index.html`) built on [PDF.js](https://mozilla.git
 ## Source
 
 https://github.com/Coder5330/pdf-viewer
+
+## License
+
+[MIT](LICENSE)
