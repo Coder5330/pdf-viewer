@@ -472,10 +472,10 @@ function drawSearchHighlights(ctx, rects, W, H){
   ctx.restore();
 }
 
-function drawTextSelection(ctx, words, W, H){
+function drawTextSelection(ctx, lineRects, W, H){
   ctx.save();
   ctx.fillStyle = 'rgba(0,120,215,0.35)';
-  words.forEach(w => ctx.fillRect(w.rectFrac.x*W, w.rectFrac.y*H, w.rectFrac.w*W, w.rectFrac.h*H));
+  lineRects.forEach(r => ctx.fillRect(r.x*W, r.y*H, r.w*W, r.h*H));
   ctx.restore();
 }
 
@@ -489,7 +489,7 @@ function redrawOverlay(){
   const p = pages[activeIndex];
   if(p.searchHighlights && p.searchHighlights.length) drawSearchHighlights(octx, p.searchHighlights, W, H);
   drawAnnotationsOnCtx(octx, p.annotations, W, H);
-  if(textSelection.pageIndex === activeIndex && textSelection.words.length) drawTextSelection(octx, textSelection.words, W, H);
+  if(textSelection.pageIndex === activeIndex && textSelection.lineRects.length) drawTextSelection(octx, textSelection.lineRects, W, H);
 }
 
 async function renderAll(){
@@ -499,12 +499,57 @@ async function renderAll(){
 
 /* ---------- Annotation interaction ---------- */
 let drawing = false, startPt = null, currentPath = null, liveShape = null;
-let selectMode = false, selectionRect = null;
-let textSelection = { pageIndex: null, words: [], text: '' };
+let selectMode = false, selectOrderedWords = [], selectStartIdx = -1, selectPreviewLines = null;
+let textSelection = { pageIndex: null, words: [], lineRects: [], text: '' };
 
 function clearTextSelection(redraw){
-  textSelection = { pageIndex: null, words: [], text: '' };
+  textSelection = { pageIndex: null, words: [], lineRects: [], text: '' };
   if(redraw !== false && pages.length) redrawOverlay();
+}
+
+// Find the word whose line is closest to pt.y, then the closest word on that
+// line by x — mirrors how native text selection anchors to the nearest glyph
+// rather than requiring the pointer to be exactly over a word.
+function nearestWordIndex(orderedWords, pt){
+  if(!orderedWords.length) return -1;
+  let lineY = null, bestLineDist = Infinity;
+  orderedWords.forEach(w => {
+    const cy = w.rectFrac.y + w.rectFrac.h/2;
+    const d = Math.abs(cy - pt.y);
+    if(d < bestLineDist){ bestLineDist = d; lineY = cy; }
+  });
+  const avgH = orderedWords.reduce((s,w)=>s+w.rectFrac.h,0)/orderedWords.length || 0.01;
+  const lineTol = avgH * 0.6;
+  let best = -1, bestDx = Infinity;
+  orderedWords.forEach((w,i) => {
+    const cy = w.rectFrac.y + w.rectFrac.h/2;
+    if(Math.abs(cy - lineY) >= lineTol) return;
+    const cx = w.rectFrac.x + w.rectFrac.w/2;
+    const d = Math.abs(cx - pt.x);
+    if(d < bestDx){ bestDx = d; best = i; }
+  });
+  return best;
+}
+
+// Merge a run of selected words (already in reading order) into one
+// continuous rect per line, filling the gaps between words — this is what
+// makes it read as a real text selection (like Word/Google Docs) instead of
+// a row of separate word boxes.
+function mergeSelectionIntoLines(words){
+  if(!words.length) return [];
+  const avgH = words.reduce((s,w)=>s+w.rectFrac.h,0)/words.length || 0.01;
+  const rowTol = avgH * 0.6;
+  const lines = [];
+  words.forEach(w => {
+    const cy = w.rectFrac.y + w.rectFrac.h/2;
+    let line = lines.find(l => Math.abs(l.cy - cy) < rowTol);
+    if(!line){ line = { cy, x0:Infinity, x1:-Infinity, y0:Infinity, y1:-Infinity }; lines.push(line); }
+    line.x0 = Math.min(line.x0, w.rectFrac.x);
+    line.x1 = Math.max(line.x1, w.rectFrac.x + w.rectFrac.w);
+    line.y0 = Math.min(line.y0, w.rectFrac.y);
+    line.y1 = Math.max(line.y1, w.rectFrac.y + w.rectFrac.h);
+  });
+  return lines.map(l => ({ x: l.x0, y: l.y0, w: l.x1-l.x0, h: l.y1-l.y0 }));
 }
 
 function sortWordsReadingOrder(words){
@@ -566,7 +611,9 @@ async function onPointerDown(e){
     const words = await ensurePageTextWords(p);
     if(!words.length) return;
     drawing = true; startPt = pt; selectMode = true;
-    selectionRect = { x: pt.x, y: pt.y, w: 0, h: 0 };
+    selectOrderedWords = sortWordsReadingOrder(words);
+    selectStartIdx = nearestWordIndex(selectOrderedWords, pt);
+    selectPreviewLines = null;
     return;
   }
   if(currentTool === 'text'){
@@ -603,18 +650,16 @@ function onPointerMove(e){
   e.preventDefault();
   const pt = fracFromEvent(e);
   if(selectMode){
-    selectionRect = {
-      x: Math.min(startPt.x, pt.x), y: Math.min(startPt.y, pt.y),
-      w: Math.abs(pt.x-startPt.x), h: Math.abs(pt.y-startPt.y)
-    };
+    if(selectStartIdx >= 0 && selectOrderedWords.length){
+      const endIdx = nearestWordIndex(selectOrderedWords, pt);
+      const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
+      const run = selectOrderedWords.slice(a, b+1);
+      selectPreviewLines = mergeSelectionIntoLines(run);
+    }
     const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
     const W = overlay.width/dpr, H = overlay.height/dpr;
     redrawOverlay();
-    const octx = overlay.getContext('2d');
-    octx.save(); octx.fillStyle = 'rgba(0,120,215,0.18)'; octx.strokeStyle = 'rgba(0,90,200,0.6)'; octx.lineWidth = 1;
-    octx.fillRect(selectionRect.x*W, selectionRect.y*H, selectionRect.w*W, selectionRect.h*H);
-    octx.strokeRect(selectionRect.x*W, selectionRect.y*H, selectionRect.w*W, selectionRect.h*H);
-    octx.restore();
+    if(selectPreviewLines && selectPreviewLines.length) drawTextSelection(overlay.getContext('2d'), selectPreviewLines, W, H);
     return;
   }
   if(wordSelectMode){
@@ -648,17 +693,25 @@ async function onPointerUp(e){
   const p = pages[activeIndex];
   if(selectMode){
     selectMode = false;
-    const rect = selectionRect; selectionRect = null;
-    if(rect.w < 0.004 && rect.h < 0.004){ clearTextSelection(); return; }
-    const words = await ensurePageTextWords(p);
-    const matched = words.filter(w => rectsIntersect(w.rectFrac, rect));
-    if(matched.length){
-      const ordered = sortWordsReadingOrder(matched);
-      textSelection = { pageIndex: activeIndex, words: ordered, text: ordered.map(w=>w.text).join(' ') };
-      toast('Selected ' + ordered.length + ' word(s) — press Ctrl/Cmd+C to copy');
+    const pt = fracFromEvent(e);
+    const endIdx = nearestWordIndex(selectOrderedWords, pt);
+    const moved = Math.hypot(pt.x-startPt.x, pt.y-startPt.y);
+    if(moved < 0.004){
+      // a plain click with no drag: clear rather than select one word, matching
+      // how a click (not a drag) behaves in a normal text selection UI
+      selectPreviewLines = null; selectOrderedWords = []; selectStartIdx = -1;
+      clearTextSelection();
+      return;
+    }
+    if(selectStartIdx >= 0 && endIdx >= 0){
+      const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
+      const run = selectOrderedWords.slice(a, b+1);
+      textSelection = { pageIndex: activeIndex, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
+      toast('Selected ' + run.length + ' word(s) — press Ctrl/Cmd+C to copy');
     } else {
       clearTextSelection(false);
     }
+    selectPreviewLines = null; selectOrderedWords = []; selectStartIdx = -1;
     redrawOverlay();
     return;
   }
