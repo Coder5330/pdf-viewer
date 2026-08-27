@@ -59,7 +59,7 @@
   #overlayCanvas.tool-rect,#overlayCanvas.tool-ellipse{cursor:crosshair;}
   #overlayCanvas.tool-text{cursor:text;}
   #overlayCanvas.tool-eraser{cursor:cell;}
-  #overlayCanvas.tool-select{cursor:default;}
+  #overlayCanvas.tool-select{cursor:text;}
 
   /* Drop zone */
   #dropzone{flex:1;display:flex;align-items:center;justify-content:center;padding:40px;}
@@ -472,6 +472,13 @@ function drawSearchHighlights(ctx, rects, W, H){
   ctx.restore();
 }
 
+function drawTextSelection(ctx, words, W, H){
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,120,215,0.35)';
+  words.forEach(w => ctx.fillRect(w.rectFrac.x*W, w.rectFrac.y*H, w.rectFrac.w*W, w.rectFrac.h*H));
+  ctx.restore();
+}
+
 function redrawOverlay(){
   const overlay = el('overlayCanvas');
   const dpr = window.devicePixelRatio || 1;
@@ -482,6 +489,7 @@ function redrawOverlay(){
   const p = pages[activeIndex];
   if(p.searchHighlights && p.searchHighlights.length) drawSearchHighlights(octx, p.searchHighlights, W, H);
   drawAnnotationsOnCtx(octx, p.annotations, W, H);
+  if(textSelection.pageIndex === activeIndex && textSelection.words.length) drawTextSelection(octx, textSelection.words, W, H);
 }
 
 async function renderAll(){
@@ -491,6 +499,42 @@ async function renderAll(){
 
 /* ---------- Annotation interaction ---------- */
 let drawing = false, startPt = null, currentPath = null, liveShape = null;
+let selectMode = false, selectionRect = null;
+let textSelection = { pageIndex: null, words: [], text: '' };
+
+function clearTextSelection(redraw){
+  textSelection = { pageIndex: null, words: [], text: '' };
+  if(redraw !== false && pages.length) redrawOverlay();
+}
+
+function sortWordsReadingOrder(words){
+  const avgH = words.reduce((s,w)=>s+w.rectFrac.h,0)/words.length || 0.01;
+  const rowTol = avgH * 0.6;
+  const sorted = [...words].sort((a,b)=> a.rectFrac.y - b.rectFrac.y);
+  const lines = [];
+  sorted.forEach(w => {
+    let line = lines.find(l => Math.abs(l.y - w.rectFrac.y) < rowTol);
+    if(!line){ line = { y: w.rectFrac.y, items: [] }; lines.push(line); }
+    line.items.push(w);
+  });
+  lines.sort((a,b)=>a.y-b.y);
+  lines.forEach(l => l.items.sort((a,b)=>a.rectFrac.x-b.rectFrac.x));
+  return lines.flatMap(l => l.items);
+}
+
+async function copySelectionToClipboard(){
+  if(!textSelection.text) return;
+  try{
+    await navigator.clipboard.writeText(textSelection.text);
+  } catch(e){
+    try{
+      const ta = document.createElement('textarea');
+      ta.value = textSelection.text; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    } catch(err){ toast('Copy failed — no clipboard access.'); return; }
+  }
+  toast('Copied ' + textSelection.words.length + ' word(s)');
+}
 
 function fracFromEvent(e){
   const rect = el('overlayCanvas').getBoundingClientRect();
@@ -514,9 +558,17 @@ function rectContainsPt(r, pt){
 }
 
 async function onPointerDown(e){
-  if(!pages.length || currentTool==='select') return;
+  if(!pages.length) return;
   e.preventDefault();
   const pt = fracFromEvent(e);
+  if(currentTool === 'select'){
+    const p = pages[activeIndex];
+    const words = await ensurePageTextWords(p);
+    if(!words.length) return;
+    drawing = true; startPt = pt; selectMode = true;
+    selectionRect = { x: pt.x, y: pt.y, w: 0, h: 0 };
+    return;
+  }
   if(currentTool === 'text'){
     const idx = findTextAt(pt);
     if(idx >= 0) openTextEditor(pages[activeIndex].annotations[idx].points[0], idx);
@@ -550,6 +602,21 @@ function onPointerMove(e){
   if(!drawing) return;
   e.preventDefault();
   const pt = fracFromEvent(e);
+  if(selectMode){
+    selectionRect = {
+      x: Math.min(startPt.x, pt.x), y: Math.min(startPt.y, pt.y),
+      w: Math.abs(pt.x-startPt.x), h: Math.abs(pt.y-startPt.y)
+    };
+    const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
+    const W = overlay.width/dpr, H = overlay.height/dpr;
+    redrawOverlay();
+    const octx = overlay.getContext('2d');
+    octx.save(); octx.fillStyle = 'rgba(0,120,215,0.18)'; octx.strokeStyle = 'rgba(0,90,200,0.6)'; octx.lineWidth = 1;
+    octx.fillRect(selectionRect.x*W, selectionRect.y*H, selectionRect.w*W, selectionRect.h*H);
+    octx.strokeRect(selectionRect.x*W, selectionRect.y*H, selectionRect.w*W, selectionRect.h*H);
+    octx.restore();
+    return;
+  }
   if(wordSelectMode){
     wordSelectRect = {
       x: Math.min(startPt.x, pt.x), y: Math.min(startPt.y, pt.y),
@@ -579,6 +646,22 @@ async function onPointerUp(e){
   if(!drawing) return;
   drawing = false;
   const p = pages[activeIndex];
+  if(selectMode){
+    selectMode = false;
+    const rect = selectionRect; selectionRect = null;
+    if(rect.w < 0.004 && rect.h < 0.004){ clearTextSelection(); return; }
+    const words = await ensurePageTextWords(p);
+    const matched = words.filter(w => rectsIntersect(w.rectFrac, rect));
+    if(matched.length){
+      const ordered = sortWordsReadingOrder(matched);
+      textSelection = { pageIndex: activeIndex, words: ordered, text: ordered.map(w=>w.text).join(' ') };
+      toast('Selected ' + ordered.length + ' word(s) — press Ctrl/Cmd+C to copy');
+    } else {
+      clearTextSelection(false);
+    }
+    redrawOverlay();
+    return;
+  }
   if(wordSelectMode){
     const words = await ensurePageTextWords(p);
     const color = currentAnnColor();
@@ -708,6 +791,7 @@ function eraseAt(pt){
 
 function setTool(t){
   cleanupTextEditor(false);
+  if(t !== 'select') clearTextSelection();
   currentTool = t;
   ['select','pen','highlighter','rect','ellipse','text','eraser'].forEach(name => {
     const btn = el('tool'+name.charAt(0).toUpperCase()+name.slice(1));
@@ -1111,6 +1195,8 @@ window.addEventListener('keydown', e => {
   if((e.metaKey||e.ctrlKey) && (e.key==='y' || (e.key==='z'&&e.shiftKey))){ e.preventDefault(); redo(); }
   if((e.metaKey||e.ctrlKey) && e.key==='p'){ e.preventDefault(); el('printBtn').click(); }
   if((e.metaKey||e.ctrlKey) && e.key==='s'){ e.preventDefault(); el('saveBtn').click(); }
+  if((e.metaKey||e.ctrlKey) && e.key==='c' && textSelection.words.length){ e.preventDefault(); copySelectionToClipboard(); }
+  if(e.key === 'Escape' && textSelection.words.length){ clearTextSelection(); }
 });
 </script>
 </body>
