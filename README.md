@@ -2,7 +2,7 @@
 
 A browser-based PDF viewer and editor — view, annotate, OCR, search, fill forms, reorder pages, and export, all client-side with no server or accounts.
 
-Created by [Coder5330](https://github.com/Coder5330).
+Owned by [Coder5330](https://github.com/Coder5330). Coded by Claude.
 
 ## Features
 
