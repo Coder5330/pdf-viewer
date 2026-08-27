@@ -84,6 +84,14 @@
 
   .text-editor-input{position:absolute;outline:1.5px dashed var(--accent);background:rgba(255,255,255,.7);padding:2px 4px;white-space:pre-wrap;min-width:14px;z-index:10;font-family:-apple-system,Arial,sans-serif;font-weight:600;line-height:1.25;cursor:text;border-radius:2px;}
 
+  #formFieldsLayer{position:absolute;top:0;left:0;pointer-events:none;z-index:6;}
+  .form-field-input{position:absolute;pointer-events:auto;box-sizing:border-box;border:1.5px solid var(--accent);background:rgba(255,255,255,.85);font-family:inherit;padding:1px 3px;resize:none;border-radius:2px;}
+  .form-field-input[type=checkbox]{padding:0;}
+
+  #searchBox{display:none;align-items:center;gap:4px;}
+  #searchInput{width:120px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:var(--toolbar-text);border-radius:5px;padding:6px 8px;font-size:12.5px;}
+  #searchCount{color:#cfd3d8;font-size:11.5px;min-width:34px;text-align:center;white-space:nowrap;}
+
   #printArea{display:none;}
   @media print{
     #toolbar,#sidebar,#dropzone,#loading,#toast{display:none!important;}
@@ -122,6 +130,18 @@
 
     <div id="spacer"></div>
 
+    <span id="searchBox">
+      <input id="searchInput" type="text" placeholder="Search text…">
+      <button class="tb-btn" id="searchPrevBtn" title="Previous match">↑</button>
+      <button class="tb-btn" id="searchNextBtn" title="Next match">↓</button>
+      <span id="searchCount"></span>
+    </span>
+    <div class="sep" id="searchSep" style="display:none;"></div>
+    <button class="tb-btn" id="ocrBtn" style="display:none;" title="OCR the current page so its text is searchable">🔎 OCR Page</button>
+    <button class="tb-btn" id="ocrAllBtn" style="display:none;" title="OCR every page">🔎 OCR All</button>
+    <button class="tb-btn" id="formToggleBtn" style="display:none;" title="Show/hide fillable form fields">📝 Form Fields</button>
+    <div class="sep" id="ocrSep" style="display:none;"></div>
+
     <button class="tb-btn" id="prevBtn" style="display:none;">‹</button>
     <span id="pageInfo" style="display:none;"><input id="pageInput" type="text" value="1"> / <span id="pageCount">0</span></span>
     <button class="tb-btn" id="nextBtn" style="display:none;">›</button>
@@ -151,6 +171,7 @@
       <div id="pageViewport" style="display:none;">
         <canvas id="baseCanvas"></canvas>
         <canvas id="overlayCanvas"></canvas>
+        <div id="formFieldsLayer"></div>
       </div>
     </div>
   </div>
@@ -163,6 +184,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 const el = id => document.getElementById(id);
@@ -222,7 +244,10 @@ function clampActiveIndex(){
 function showEditorChrome(show){
   ['insertBtn','toolSelect','toolPen','toolHighlighter','toolRect','toolEllipse','toolText','toolEraser',
    'colorPicker','widthSlider','annSep','undoBtn','redoBtn','prevBtn','pageInfo','nextBtn','zoomSep',
-   'zoomOutBtn','zoomLevel','zoomInBtn','endSep','printBtn','saveBtn'].forEach(id => el(id).style.display = show ? '' : 'none');
+   'zoomOutBtn','zoomLevel','zoomInBtn','endSep','printBtn','saveBtn',
+   'ocrBtn','ocrAllBtn','ocrSep'].forEach(id => el(id).style.display = show ? '' : 'none');
+  el('searchBox').style.display = show ? 'flex' : 'none';
+  el('searchSep').style.display = show ? '' : 'none';
   el('sidebar').classList.toggle('active', show);
 }
 
@@ -255,6 +280,8 @@ async function loadFile(file, isMain){
 async function openMain(file){
   setLoading(true, 'Loading document…');
   docs = []; pages = []; history=[]; redoStack=[]; activeIndex = 0;
+  searchMatches = []; searchCursor = -1; el('searchInput').value=''; el('searchCount').textContent='';
+  formDocIdx = null; formFieldsByPage = {}; formValues = {}; formFieldsVisible = true;
   const newPages = await loadFile(file, true);
   if(!newPages){ setLoading(false); return; }
   pages = newPages;
@@ -262,6 +289,8 @@ async function openMain(file){
   el('pageCount').textContent = pages.length;
   el('pageViewport').style.display = '';
   await renderThumbnails();
+  await detectForm(0);
+  el('formToggleBtn').style.display = formDocIdx!=null ? '' : 'none';
   await renderActivePage();
   setLoading(false);
   updateUndoRedoButtons();
@@ -362,7 +391,7 @@ async function renderThumbnails(){
       if(e.target.dataset.act) return;
       activeIndex = i; renderActivePage(); highlightActiveThumb();
     });
-    actions.querySelector('[data-act=rotate]').onclick = () => { snapshot(); p.rotation = (p.rotation+90)%360; renderThumbnails(); if(i===activeIndex) renderActivePage(); };
+    actions.querySelector('[data-act=rotate]').onclick = () => { snapshot(); p.rotation = (p.rotation+90)%360; p.textWords = null; renderThumbnails(); if(i===activeIndex) renderActivePage(); };
     actions.querySelector('[data-act=dup]').onclick = () => {
       snapshot();
       const clone = JSON.parse(JSON.stringify(p)); clone.uid = uidCounter++;
@@ -425,11 +454,19 @@ async function renderActivePage(){
   if(page){ await page.render({ canvasContext: bctx, viewport }).promise; }
   else { bctx.fillStyle = '#fff'; bctx.fillRect(0,0,viewport.width,viewport.height); }
   redrawOverlay();
+  await renderFormFieldOverlay();
   el('pageInput').value = activeIndex+1;
   el('zoomLevel').textContent = Math.round((zoom/1.25)*100)+'%';
   el('prevBtn').disabled = activeIndex===0;
   el('nextBtn').disabled = activeIndex===pages.length-1;
   highlightActiveThumb();
+}
+
+function drawSearchHighlights(ctx, rects, W, H){
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,213,0,0.45)';
+  rects.forEach(r => ctx.fillRect(r.x*W, r.y*H, r.w*W, r.h*H));
+  ctx.restore();
 }
 
 function redrawOverlay(){
@@ -439,7 +476,9 @@ function redrawOverlay(){
   octx.setTransform(dpr,0,0,dpr,0,0);
   const W = overlay.width/dpr, H = overlay.height/dpr;
   octx.clearRect(0,0,W,H);
-  drawAnnotationsOnCtx(octx, pages[activeIndex].annotations, W, H);
+  const p = pages[activeIndex];
+  if(p.searchHighlights && p.searchHighlights.length) drawSearchHighlights(octx, p.searchHighlights, W, H);
+  drawAnnotationsOnCtx(octx, p.annotations, W, H);
 }
 
 async function renderAll(){
@@ -646,6 +685,283 @@ el('zoomOutBtn').onclick = () => { zoom = Math.max(0.5, zoom-0.25); renderActive
 el('undoBtn').onclick = undo;
 el('redoBtn').onclick = redo;
 
+/* ---------- OCR (Tesseract.js) ---------- */
+let tesseractWorker = null;
+async function getOcrWorker(){
+  if(tesseractWorker) return tesseractWorker;
+  tesseractWorker = await Tesseract.createWorker('eng');
+  return tesseractWorker;
+}
+
+async function ocrPage(p){
+  const scale = 2.5; // higher DPI improves OCR accuracy
+  const canvas = await renderPageComposite(p, scale);
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(canvas);
+  const words = (data.words || []).filter(w => w.text && w.text.trim()).map(w => ({
+    text: w.text,
+    rectFrac: {
+      x: w.bbox.x0 / canvas.width, y: w.bbox.y0 / canvas.height,
+      w: (w.bbox.x1 - w.bbox.x0) / canvas.width, h: (w.bbox.y1 - w.bbox.y0) / canvas.height
+    }
+  }));
+  p.ocrText = data.text;
+  p.ocrWords = words;
+  p.textWords = null; // invalidate cache so search picks up OCR words
+  return data.text;
+}
+
+el('ocrBtn').onclick = async () => {
+  if(!pages.length) return;
+  const p = pages[activeIndex];
+  setLoading(true, 'Running OCR on this page…');
+  try{
+    await ocrPage(p);
+    toast('OCR complete — ' + p.ocrWords.length + ' word(s) found and now searchable.');
+  } catch(err){
+    console.error(err);
+    toast('OCR failed — see console.');
+  }
+  setLoading(false);
+};
+
+el('ocrAllBtn').onclick = async () => {
+  if(!pages.length) return;
+  for(let i=0;i<pages.length;i++){
+    setLoading(true, `OCR: page ${i+1} of ${pages.length}…`);
+    try{ await ocrPage(pages[i]); } catch(err){ console.error(err); }
+  }
+  setLoading(false);
+  toast('OCR complete for all pages.');
+};
+
+/* ---------- Text-layer + OCR search ---------- */
+let searchMatches = [], searchCursor = -1;
+
+async function ensurePageTextWords(p){
+  if(p.textWords) return p.textWords;
+  let words = [];
+  if(p.kind === 'source'){
+    try{
+      const page = await getPdfjsPage(p);
+      const tc = await page.getTextContent();
+      const total = ((page.rotate||0) + p.rotation) % 360;
+      const viewport = page.getViewport({ scale: 1, rotation: total });
+      tc.items.forEach(item => {
+        if(!item.str || !item.str.trim()) return;
+        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+        const w = item.width || 1, h = item.height || Math.hypot(tx[2], tx[3]) || 10;
+        const corners = [[0,0],[w,0],[0,h],[w,h]].map(([lx,ly]) => [
+          tx[0]*lx + tx[2]*ly + tx[4],
+          tx[1]*lx + tx[3]*ly + tx[5]
+        ]);
+        const xs = corners.map(c=>c[0]), ys = corners.map(c=>c[1]);
+        const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+        words.push({ text: item.str, rectFrac: {
+          x: x0/viewport.width, y: y0/viewport.height,
+          w: (x1-x0)/viewport.width, h: (y1-y0)/viewport.height
+        }});
+      });
+    } catch(err){ console.warn('text extraction failed', err); }
+  }
+  if(words.length === 0 && p.ocrWords && p.ocrWords.length) words = p.ocrWords;
+  p.textWords = words;
+  return words;
+}
+
+async function runSearch(query){
+  query = query.trim().toLowerCase();
+  pages.forEach(p => p.searchHighlights = null);
+  searchMatches = []; searchCursor = -1;
+  el('searchCount').textContent = '';
+  if(!query){ redrawOverlay(); return; }
+  for(let i=0;i<pages.length;i++){
+    const words = await ensurePageTextWords(pages[i]);
+    if(words.some(w => w.text.toLowerCase().includes(query))) searchMatches.push(i);
+  }
+  if(!searchMatches.length){ toast('No matches found. Try OCR-ing scanned pages first.'); return; }
+  searchCursor = 0;
+  await gotoSearchMatch();
+}
+
+async function gotoSearchMatch(){
+  if(searchCursor < 0 || searchCursor >= searchMatches.length) return;
+  const query = el('searchInput').value.trim().toLowerCase();
+  const pageIdx = searchMatches[searchCursor];
+  activeIndex = pageIdx;
+  const words = await ensurePageTextWords(pages[pageIdx]);
+  pages[pageIdx].searchHighlights = words.filter(w => w.text.toLowerCase().includes(query)).map(w => w.rectFrac);
+  await renderActivePage();
+  el('searchCount').textContent = (searchCursor+1) + '/' + searchMatches.length;
+}
+function searchNext(){ if(!searchMatches.length) return; searchCursor = (searchCursor+1) % searchMatches.length; gotoSearchMatch(); }
+function searchPrev(){ if(!searchMatches.length) return; searchCursor = (searchCursor-1+searchMatches.length) % searchMatches.length; gotoSearchMatch(); }
+
+el('searchInput').addEventListener('keydown', e => {
+  e.stopPropagation();
+  if(e.key === 'Enter'){
+    e.preventDefault();
+    if(e.shiftKey) searchPrev();
+    else if(searchMatches.length && el('searchInput')._lastQuery === el('searchInput').value) searchNext();
+    else runSearch(el('searchInput').value);
+    el('searchInput')._lastQuery = el('searchInput').value;
+  }
+});
+el('searchPrevBtn').onclick = searchPrev;
+el('searchNextBtn').onclick = searchNext;
+
+/* ---------- Form-filling (AcroForm) ---------- */
+let formDocIdx = null, formFieldsByPage = {}, formValues = {}, formFieldsVisible = true;
+
+async function detectForm(docIdx){
+  formDocIdx = null; formFieldsByPage = {}; formValues = {};
+  try{
+    const libDoc = await getPdfLibDoc(docIdx);
+    let form;
+    try{ form = libDoc.getForm(); } catch(e){ return; }
+    const fields = form.getFields();
+    if(!fields.length) return;
+    const PDFName = PDFLib.PDFName;
+    const nameToField = {};
+    fields.forEach(f => nameToField[f.getName()] = f);
+
+    function resolveFieldName(dict, ctx, depth){
+      if(depth > 12 || !dict) return null;
+      try{
+        const t = dict.lookup(PDFName.of('T'));
+        if(t) return (typeof t.decodeText === 'function') ? t.decodeText() : String(t);
+      } catch(e){}
+      try{
+        const parentRef = dict.get(PDFName.of('Parent'));
+        if(parentRef){
+          const parentDict = ctx.lookup(parentRef);
+          if(parentDict) return resolveFieldName(parentDict, ctx, depth+1);
+        }
+      } catch(e){}
+      return null;
+    }
+
+    const ctx = libDoc.context;
+    const pdfPages = libDoc.getPages();
+    for(let i=0;i<pdfPages.length;i++){
+      let annotsArr;
+      try{ annotsArr = pdfPages[i].node.lookup(PDFName.of('Annots')); } catch(e){ annotsArr = null; }
+      if(!annotsArr) continue;
+      const n = annotsArr.size();
+      for(let j=0;j<n;j++){
+        let annotDict;
+        try{ annotDict = annotsArr.lookup(j); } catch(e){ continue; }
+        if(!annotDict) continue;
+        const fname = resolveFieldName(annotDict, ctx, 0);
+        if(!fname || !nameToField[fname]) continue;
+        if(formFieldsByPage[i] && formFieldsByPage[i].some(e => e.name === fname)) continue;
+        let rect;
+        try{
+          const rectArr = annotDict.lookup(PDFName.of('Rect'));
+          const nums = [0,1,2,3].map(k => rectArr.lookup(k).asNumber());
+          const x = Math.min(nums[0],nums[2]), y = Math.min(nums[1],nums[3]);
+          const w = Math.abs(nums[2]-nums[0]), h = Math.abs(nums[3]-nums[1]);
+          rect = [x,y,w,h];
+        } catch(e){ continue; }
+        const field = nameToField[fname];
+        let type=null, options=null, defaultValue=null;
+        if(field instanceof PDFLib.PDFTextField){ type='text'; try{ defaultValue = field.getText()||''; }catch(e){} }
+        else if(field instanceof PDFLib.PDFCheckBox){ type='checkbox'; try{ defaultValue = field.isChecked(); }catch(e){} }
+        else if(field instanceof PDFLib.PDFDropdown || field instanceof PDFLib.PDFOptionList){
+          type='choice'; try{ options = field.getOptions(); }catch(e){ options=[]; }
+          try{ const sel = field.getSelected(); defaultValue = sel && sel[0]; }catch(e){}
+        } else if(field instanceof PDFLib.PDFRadioGroup){
+          type='choice'; try{ options = field.getOptions(); }catch(e){ options=[]; }
+          try{ defaultValue = field.getSelected(); }catch(e){}
+        } else { continue; } // buttons/signatures unsupported
+
+        if(!formFieldsByPage[i]) formFieldsByPage[i] = [];
+        formFieldsByPage[i].push({ name: fname, type, rect, options, defaultValue });
+        if(!(fname in formValues)) formValues[fname] = defaultValue;
+      }
+    }
+    if(Object.keys(formFieldsByPage).length) formDocIdx = docIdx;
+  } catch(e){
+    console.warn('Form detection failed', e);
+    formDocIdx = null; formFieldsByPage = {};
+  }
+}
+
+async function renderFormFieldOverlay(){
+  const layer = el('formFieldsLayer');
+  layer.innerHTML = '';
+  if(!pages.length) return;
+  const p = pages[activeIndex];
+  layer.style.width = el('overlayCanvas').style.width;
+  layer.style.height = el('overlayCanvas').style.height;
+  if(!formFieldsVisible || p.kind !== 'source' || p.srcDocIdx !== formDocIdx) return;
+  const entries = formFieldsByPage[p.srcPageNum-1];
+  if(!entries || !entries.length) return;
+  const page = await getPdfjsPage(p);
+  const total = ((page.rotate||0) + p.rotation) % 360;
+  const viewport = page.getViewport({ scale: zoom, rotation: total });
+  entries.forEach(fieldEntry => {
+    const [rx,ry,rw,rh] = fieldEntry.rect;
+    const [vx1,vy1,vx2,vy2] = viewport.convertToViewportRectangle([rx, ry, rx+rw, ry+rh]);
+    const left = Math.min(vx1,vx2), top = Math.min(vy1,vy2);
+    const width = Math.max(4, Math.abs(vx2-vx1)), height = Math.max(4, Math.abs(vy2-vy1));
+    let inputEl;
+    if(fieldEntry.type === 'text'){
+      inputEl = document.createElement('textarea');
+      inputEl.value = formValues[fieldEntry.name] ?? '';
+      inputEl.style.fontSize = Math.max(9, height*0.7) + 'px';
+      inputEl.addEventListener('input', () => formValues[fieldEntry.name] = inputEl.value);
+    } else if(fieldEntry.type === 'checkbox'){
+      inputEl = document.createElement('input');
+      inputEl.type = 'checkbox';
+      inputEl.checked = !!formValues[fieldEntry.name];
+      inputEl.addEventListener('change', () => formValues[fieldEntry.name] = inputEl.checked);
+    } else if(fieldEntry.type === 'choice'){
+      inputEl = document.createElement('select');
+      (fieldEntry.options||[]).forEach(o => {
+        const opt = document.createElement('option'); opt.value = o; opt.textContent = o;
+        inputEl.appendChild(opt);
+      });
+      inputEl.value = formValues[fieldEntry.name] ?? '';
+      inputEl.style.fontSize = Math.max(9, height*0.6) + 'px';
+      inputEl.addEventListener('change', () => formValues[fieldEntry.name] = inputEl.value);
+    } else return;
+    inputEl.className = 'form-field-input';
+    inputEl.title = fieldEntry.name;
+    inputEl.style.left = left + 'px';
+    inputEl.style.top = top + 'px';
+    inputEl.style.width = width + 'px';
+    inputEl.style.height = height + 'px';
+    layer.appendChild(inputEl);
+  });
+}
+
+async function applyFormValuesAndFlatten(){
+  if(formDocIdx == null) return;
+  const libDoc = await getPdfLibDoc(formDocIdx);
+  let form;
+  try{ form = libDoc.getForm(); } catch(e){ return; }
+  const fields = form.getFields();
+  if(!fields.length) return; // already flattened, or nothing to do
+  fields.forEach(f => {
+    const name = f.getName();
+    if(!(name in formValues)) return;
+    const val = formValues[name];
+    try{
+      if(f instanceof PDFLib.PDFTextField) f.setText(val || '');
+      else if(f instanceof PDFLib.PDFCheckBox){ if(val) f.check(); else f.uncheck(); }
+      else if((f instanceof PDFLib.PDFDropdown || f instanceof PDFLib.PDFOptionList || f instanceof PDFLib.PDFRadioGroup) && val) f.select(val);
+    } catch(err){ console.warn('could not set field', name, err); }
+  });
+  try{ form.flatten(); } catch(err){ console.warn('flatten failed', err); }
+}
+
+el('formToggleBtn').onclick = () => {
+  formFieldsVisible = !formFieldsVisible;
+  el('formToggleBtn').classList.toggle('active', formFieldsVisible);
+  renderFormFieldOverlay();
+};
+
 /* ---------- Save (export) ---------- */
 async function getPdfLibDoc(idx){
   const d = docs[idx];
@@ -688,6 +1004,7 @@ function downloadBytes(bytes, filename){
 el('saveBtn').onclick = async () => {
   setLoading(true, 'Building your PDF…');
   try{
+    await applyFormValuesAndFlatten();
     const outDoc = await buildExportDoc(pages);
     const bytes = await outDoc.save();
     downloadBytes(bytes, originalName + '-edited.pdf');
