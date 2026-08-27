@@ -892,8 +892,18 @@ async function ensurePageTextWords(p){
       tc.items.forEach(item => {
         const str = item.str;
         if(!str || !str.trim()) return;
-        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-        const totalW = item.width || 1, totalH = item.height || Math.hypot(tx[2], tx[3]) || 10;
+        // item.width/item.height are already resolved to PDF user-space point
+        // distances (not raw glyph-space units), and item.transform's linear
+        // part (a,b,c,d) already encodes the font-size scaling used to derive
+        // them. So the box must be built by walking `width` points along the
+        // transform's direction — NOT by re-running width/height back through
+        // the full transform matrix, which double-applies that scaling and
+        // inflates the box far past the actual glyphs (previously stretched
+        // highlights across an entire line or even off the page).
+        const angle = Math.atan2(item.transform[1], item.transform[0]);
+        const cosA = Math.cos(angle), sinA = Math.sin(angle);
+        const ox = item.transform[4], oy = item.transform[5];
+        const totalW = item.width || 1, totalH = item.height || Math.hypot(item.transform[2], item.transform[3]) || 10;
         // pdf.js text items are often whole lines, not single words — split by
         // character offset and distribute width proportionally so highlight
         // boxes land on individual words instead of the whole line/paragraph.
@@ -901,11 +911,12 @@ async function ensurePageTextWords(p){
         let match;
         while((match = wordRe.exec(str))){
           const x0f = match.index / str.length, x1f = (match.index + match[0].length) / str.length;
-          const lx0 = x0f*totalW, lx1 = x1f*totalW;
-          const corners = [[lx0,0],[lx1,0],[lx0,totalH],[lx1,totalH]].map(([lx,ly]) => [
-            tx[0]*lx + tx[2]*ly + tx[4],
-            tx[1]*lx + tx[3]*ly + tx[5]
-          ]);
+          const dx0 = x0f*totalW, dx1 = x1f*totalW;
+          const corners = [[dx0,0],[dx1,0],[dx0,totalH],[dx1,totalH]].map(([dx,dy]) => {
+            const ux = ox + dx*cosA - dy*sinA;
+            const uy = oy + dx*sinA + dy*cosA;
+            return pdfjsLib.Util.applyTransform([ux, uy], viewport.transform);
+          });
           const xs = corners.map(c=>c[0]), ys = corners.map(c=>c[1]);
           const gx0=Math.min(...xs), gx1=Math.max(...xs), gy0=Math.min(...ys), gy1=Math.max(...ys);
           words.push({ text: match[0], rectFrac: {
