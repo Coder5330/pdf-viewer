@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quickview-v2.2 — PDF Editor</title>
+<title>Quickview-v2.3 — PDF Editor</title>
 <style>
   :root{
     --ink:#1c2128; --paper:#fff; --backdrop:#e7e4de;
@@ -108,7 +108,7 @@
 <div id="app">
 
   <div id="toolbar">
-    <div class="brand"><span class="dot"></span>Quickview-v2.2</div>
+    <div class="brand"><span class="dot"></span>Quickview-v2.3</div>
     <div class="sep"></div>
     <button class="tb-btn" id="openBtn">Open…</button>
     <button class="tb-btn" id="insertBtn" style="display:none;">Insert PDF…</button>
@@ -282,6 +282,7 @@ async function openMain(file){
   docs = []; pages = []; history=[]; redoStack=[]; activeIndex = 0;
   searchMatches = []; searchCursor = -1; el('searchInput').value=''; el('searchCount').textContent='';
   formDocIdx = null; formFieldsByPage = {}; formValues = {}; formFieldsVisible = true;
+  textSelectionAnchor = { pageIndex: null, idx: -1 }; clearTextSelection(false);
   const newPages = await loadFile(file, true);
   if(!newPages){ setLoading(false); return; }
   pages = newPages;
@@ -520,10 +521,21 @@ function nearestWordIndex(orderedWords, pt){
   });
   const avgH = orderedWords.reduce((s,w)=>s+w.rectFrac.h,0)/orderedWords.length || 0.01;
   const lineTol = avgH * 0.6;
-  let best = -1, bestDx = Infinity;
+  const sameLine = [];
   orderedWords.forEach((w,i) => {
     const cy = w.rectFrac.y + w.rectFrac.h/2;
-    if(Math.abs(cy - lineY) >= lineTol) return;
+    if(Math.abs(cy - lineY) < lineTol) sameLine.push(i);
+  });
+  // If the point falls inside a word's own box, use that word directly —
+  // comparing only center distance can snap a click near a word's edge to a
+  // closer, narrower neighbor instead of the word actually under the pointer.
+  for(const i of sameLine){
+    const w = orderedWords[i];
+    if(pt.x >= w.rectFrac.x && pt.x <= w.rectFrac.x + w.rectFrac.w) return i;
+  }
+  let best = -1, bestDx = Infinity;
+  sameLine.forEach(i => {
+    const w = orderedWords[i];
     const cx = w.rectFrac.x + w.rectFrac.w/2;
     const d = Math.abs(cx - pt.x);
     if(d < bestDx){ bestDx = d; best = i; }
@@ -594,12 +606,52 @@ function currentAnnWidthFrac(){
 }
 
 let wordSelectMode = false, wordSelectRect = null;
+let textSelectionAnchor = { pageIndex: null, idx: -1 }, selectIsShiftExtend = false;
+let lastClientX = null, lastClientY = null, autoScrollDy = 0, autoScrollHandle = null;
 
 function rectsIntersect(a, b){
   return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
 }
 function rectContainsPt(r, pt){
   return pt.x >= r.x && pt.x <= r.x+r.w && pt.y >= r.y && pt.y <= r.y+r.h;
+}
+
+// Recompute the live selection preview from a raw viewport point (used both
+// by mousemove and by the auto-scroll loop, since scrolling moves the page
+// under a pointer that hasn't itself moved).
+function updateSelectionPreviewFromClientPt(clientX, clientY){
+  const rect = el('overlayCanvas').getBoundingClientRect();
+  const pt = { x: Math.min(1,Math.max(0,(clientX-rect.left)/rect.width)), y: Math.min(1,Math.max(0,(clientY-rect.top)/rect.height)) };
+  if(selectStartIdx >= 0 && selectOrderedWords.length){
+    const endIdx = nearestWordIndex(selectOrderedWords, pt);
+    const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
+    const run = selectOrderedWords.slice(a, b+1);
+    selectPreviewLines = mergeSelectionIntoLines(run);
+  }
+  const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
+  const W = overlay.width/dpr, H = overlay.height/dpr;
+  redrawOverlay();
+  if(selectPreviewLines && selectPreviewLines.length) drawTextSelection(overlay.getContext('2d'), selectPreviewLines, W, H);
+  return pt;
+}
+
+function autoScrollStep(){
+  if(!drawing || !selectMode || autoScrollDy === 0){ autoScrollHandle = null; return; }
+  el('main').scrollTop += autoScrollDy;
+  if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
+  autoScrollHandle = requestAnimationFrame(autoScrollStep);
+}
+function updateAutoScroll(clientY){
+  const rect = el('main').getBoundingClientRect();
+  const EDGE = 50, MAXSPEED = 18;
+  if(clientY > rect.bottom - EDGE) autoScrollDy = MAXSPEED * Math.min(1, (clientY-(rect.bottom-EDGE))/EDGE);
+  else if(clientY < rect.top + EDGE) autoScrollDy = -MAXSPEED * Math.min(1, ((rect.top+EDGE)-clientY)/EDGE);
+  else autoScrollDy = 0;
+  if(autoScrollDy !== 0 && autoScrollHandle == null) autoScrollHandle = requestAnimationFrame(autoScrollStep);
+}
+function stopAutoScroll(){
+  autoScrollDy = 0;
+  if(autoScrollHandle != null){ cancelAnimationFrame(autoScrollHandle); autoScrollHandle = null; }
 }
 
 async function onPointerDown(e){
@@ -612,8 +664,19 @@ async function onPointerDown(e){
     if(!words.length) return;
     drawing = true; startPt = pt; selectMode = true;
     selectOrderedWords = sortWordsReadingOrder(words);
-    selectStartIdx = nearestWordIndex(selectOrderedWords, pt);
+    if(e.shiftKey && textSelectionAnchor.pageIndex === activeIndex && textSelectionAnchor.idx >= 0){
+      // shift-click/drag extends the existing selection from its original
+      // anchor to this new point, the standard "select from X to Y" shortcut
+      selectStartIdx = textSelectionAnchor.idx;
+      selectIsShiftExtend = true;
+    } else {
+      selectStartIdx = nearestWordIndex(selectOrderedWords, pt);
+      textSelectionAnchor = { pageIndex: activeIndex, idx: selectStartIdx };
+      selectIsShiftExtend = false;
+    }
     selectPreviewLines = null;
+    lastClientX = (e.touches ? e.touches[0].clientX : e.clientX);
+    lastClientY = (e.touches ? e.touches[0].clientY : e.clientY);
     return;
   }
   if(currentTool === 'text'){
@@ -650,16 +713,11 @@ function onPointerMove(e){
   e.preventDefault();
   const pt = fracFromEvent(e);
   if(selectMode){
-    if(selectStartIdx >= 0 && selectOrderedWords.length){
-      const endIdx = nearestWordIndex(selectOrderedWords, pt);
-      const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
-      const run = selectOrderedWords.slice(a, b+1);
-      selectPreviewLines = mergeSelectionIntoLines(run);
-    }
-    const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
-    const W = overlay.width/dpr, H = overlay.height/dpr;
-    redrawOverlay();
-    if(selectPreviewLines && selectPreviewLines.length) drawTextSelection(overlay.getContext('2d'), selectPreviewLines, W, H);
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX);
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY);
+    lastClientX = cx; lastClientY = cy;
+    updateSelectionPreviewFromClientPt(cx, cy);
+    updateAutoScroll(cy);
     return;
   }
   if(wordSelectMode){
@@ -693,10 +751,11 @@ async function onPointerUp(e){
   const p = pages[activeIndex];
   if(selectMode){
     selectMode = false;
+    stopAutoScroll();
     const pt = fracFromEvent(e);
     const endIdx = nearestWordIndex(selectOrderedWords, pt);
     const moved = Math.hypot(pt.x-startPt.x, pt.y-startPt.y);
-    if(moved < 0.004){
+    if(moved < 0.004 && !selectIsShiftExtend){
       // a plain click with no drag: clear rather than select one word, matching
       // how a click (not a drag) behaves in a normal text selection UI
       selectPreviewLines = null; selectOrderedWords = []; selectStartIdx = -1;
@@ -711,7 +770,7 @@ async function onPointerUp(e){
     } else {
       clearTextSelection(false);
     }
-    selectPreviewLines = null; selectOrderedWords = []; selectStartIdx = -1;
+    selectPreviewLines = null; selectOrderedWords = []; selectStartIdx = -1; selectIsShiftExtend = false;
     redrawOverlay();
     return;
   }
@@ -839,12 +898,18 @@ function eraseAt(pt){
   }
 }
 ['mousedown','touchstart'].forEach(ev => el('overlayCanvas').addEventListener(ev, onPointerDown, {passive:false}));
-['mousemove','touchmove'].forEach(ev => el('overlayCanvas').addEventListener(ev, onPointerMove, {passive:false}));
-['mouseup','touchend','mouseleave'].forEach(ev => el('overlayCanvas').addEventListener(ev, onPointerUp, {passive:false}));
+// mousemove/mouseup are bound on window (not just the canvas) so an in-progress
+// drag — a pen stroke, a text selection reaching toward the page edge for
+// auto-scroll, etc. — isn't cut short the moment the pointer crosses the
+// canvas boundary (the canvas is only as big as the rendered page, centered
+// with padding around it, so this happens often). Handlers already no-op via
+// the `drawing` guard when nothing is in progress.
+['mousemove','touchmove'].forEach(ev => window.addEventListener(ev, onPointerMove, {passive:false}));
+['mouseup','touchend'].forEach(ev => window.addEventListener(ev, onPointerUp, {passive:false}));
 
 function setTool(t){
   cleanupTextEditor(false);
-  if(t !== 'select') clearTextSelection();
+  if(t !== 'select'){ clearTextSelection(); textSelectionAnchor = { pageIndex: null, idx: -1 }; }
   currentTool = t;
   ['select','pen','highlighter','rect','ellipse','text','eraser'].forEach(name => {
     const btn = el('tool'+name.charAt(0).toUpperCase()+name.slice(1));
