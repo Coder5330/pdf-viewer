@@ -352,6 +352,8 @@ function drawAnnotationsOnCtx(ctx, annotations, W, H){
       ctx.textBaseline = 'top';
       const lines = String(a.text).split('\n');
       lines.forEach((line, li) => ctx.fillText(line, pt.x*W, pt.y*H + li*size*1.25));
+    } else if(a.type === 'wordhighlight'){
+      ctx.fillRect(a.rect.x*W, a.rect.y*H, a.rect.w*W, a.rect.h*H);
     }
     ctx.restore();
   });
@@ -455,6 +457,7 @@ async function renderActivePage(){
   else { bctx.fillStyle = '#fff'; bctx.fillRect(0,0,viewport.width,viewport.height); }
   redrawOverlay();
   await renderFormFieldOverlay();
+  ensurePageTextWords(p).catch(()=>{}); // warm the cache so the highlighter tool can snap to words immediately
   el('pageInput').value = activeIndex+1;
   el('zoomLevel').textContent = Math.round((zoom/1.25)*100)+'%';
   el('prevBtn').disabled = activeIndex===0;
@@ -501,7 +504,16 @@ function currentAnnWidthFrac(){
   return parseFloat(el('widthSlider').value) / (overlay.getBoundingClientRect().width || 800);
 }
 
-function onPointerDown(e){
+let wordSelectMode = false, wordSelectRect = null;
+
+function rectsIntersect(a, b){
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+function rectContainsPt(r, pt){
+  return pt.x >= r.x && pt.x <= r.x+r.w && pt.y >= r.y && pt.y <= r.y+r.h;
+}
+
+async function onPointerDown(e){
   if(!pages.length || currentTool==='select') return;
   e.preventDefault();
   const pt = fracFromEvent(e);
@@ -515,7 +527,17 @@ function onPointerDown(e){
     eraseAt(pt);
     return;
   }
-  drawing = true; startPt = pt;
+  if(currentTool === 'highlighter'){
+    const p = pages[activeIndex];
+    const words = await ensurePageTextWords(p);
+    if(words.length){
+      // snap-to-word mode: drag a box (or click one word) instead of freehand ink
+      drawing = true; startPt = pt; wordSelectMode = true;
+      wordSelectRect = { x: pt.x, y: pt.y, w: 0, h: 0 };
+      return;
+    }
+  }
+  drawing = true; startPt = pt; wordSelectMode = false;
   if(currentTool === 'pen' || currentTool === 'highlighter'){
     currentPath = { type:'path', points:[pt], color: currentAnnColor(),
       lwFrac: currentAnnWidthFrac() * (currentTool==='highlighter'?4:1),
@@ -528,6 +550,21 @@ function onPointerMove(e){
   if(!drawing) return;
   e.preventDefault();
   const pt = fracFromEvent(e);
+  if(wordSelectMode){
+    wordSelectRect = {
+      x: Math.min(startPt.x, pt.x), y: Math.min(startPt.y, pt.y),
+      w: Math.abs(pt.x-startPt.x), h: Math.abs(pt.y-startPt.y)
+    };
+    const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
+    const W = overlay.width/dpr, H = overlay.height/dpr;
+    redrawOverlay();
+    const octx = overlay.getContext('2d');
+    octx.save(); octx.fillStyle = 'rgba(44,95,111,0.18)'; octx.strokeStyle = 'rgba(44,95,111,0.6)'; octx.lineWidth = 1;
+    octx.fillRect(wordSelectRect.x*W, wordSelectRect.y*H, wordSelectRect.w*W, wordSelectRect.h*H);
+    octx.strokeRect(wordSelectRect.x*W, wordSelectRect.y*H, wordSelectRect.w*W, wordSelectRect.h*H);
+    octx.restore();
+    return;
+  }
   if(currentPath){
     currentPath.points.push(pt);
     redrawOverlay(); drawAnnotationsOnCtx(el('overlayCanvas').getContext('2d'), [currentPath],
@@ -538,10 +575,29 @@ function onPointerMove(e){
       el('overlayCanvas').width/(window.devicePixelRatio||1), el('overlayCanvas').height/(window.devicePixelRatio||1));
   }
 }
-function onPointerUp(e){
+async function onPointerUp(e){
   if(!drawing) return;
   drawing = false;
   const p = pages[activeIndex];
+  if(wordSelectMode){
+    const words = await ensurePageTextWords(p);
+    const color = currentAnnColor();
+    let hitRect = wordSelectRect;
+    if(hitRect.w < 0.004 && hitRect.h < 0.004){
+      // treat as a click: highlight the single word under the pointer
+      const hit = words.find(w => rectContainsPt(w.rectFrac, startPt));
+      if(hit) hitRect = hit.rectFrac;
+      else hitRect = null;
+    }
+    const matched = hitRect ? words.filter(w => rectsIntersect(w.rectFrac, hitRect)) : [];
+    if(matched.length){
+      snapshot();
+      matched.forEach(w => p.annotations.push({ type:'wordhighlight', rect: w.rectFrac, color, alpha:0.4 }));
+    }
+    wordSelectMode = false; wordSelectRect = null;
+    redrawOverlay(); renderThumbnails();
+    return;
+  }
   if(currentPath && currentPath.points.length>1){ snapshot(); p.annotations.push(currentPath); }
   if(liveShape){ snapshot(); p.annotations.push(liveShape); }
   currentPath = null; liveShape = null;
@@ -640,6 +696,8 @@ function eraseAt(pt){
     } else if(a.type === 'text'){
       const q = a.points[0];
       hit = Math.abs(q.x-pt.x) < 0.15 && Math.abs(q.y-pt.y) < 0.05;
+    } else if(a.type === 'wordhighlight'){
+      hit = rectContainsPt(a.rect, pt);
     }
     if(hit){ snapshot(); p.annotations.splice(i,1); redrawOverlay(); renderThumbnails(); return; }
   }
@@ -748,19 +806,29 @@ async function ensurePageTextWords(p){
       const total = ((page.rotate||0) + p.rotation) % 360;
       const viewport = page.getViewport({ scale: 1, rotation: total });
       tc.items.forEach(item => {
-        if(!item.str || !item.str.trim()) return;
+        const str = item.str;
+        if(!str || !str.trim()) return;
         const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-        const w = item.width || 1, h = item.height || Math.hypot(tx[2], tx[3]) || 10;
-        const corners = [[0,0],[w,0],[0,h],[w,h]].map(([lx,ly]) => [
-          tx[0]*lx + tx[2]*ly + tx[4],
-          tx[1]*lx + tx[3]*ly + tx[5]
-        ]);
-        const xs = corners.map(c=>c[0]), ys = corners.map(c=>c[1]);
-        const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
-        words.push({ text: item.str, rectFrac: {
-          x: x0/viewport.width, y: y0/viewport.height,
-          w: (x1-x0)/viewport.width, h: (y1-y0)/viewport.height
-        }});
+        const totalW = item.width || 1, totalH = item.height || Math.hypot(tx[2], tx[3]) || 10;
+        // pdf.js text items are often whole lines, not single words — split by
+        // character offset and distribute width proportionally so highlight
+        // boxes land on individual words instead of the whole line/paragraph.
+        const wordRe = /\S+/g;
+        let match;
+        while((match = wordRe.exec(str))){
+          const x0f = match.index / str.length, x1f = (match.index + match[0].length) / str.length;
+          const lx0 = x0f*totalW, lx1 = x1f*totalW;
+          const corners = [[lx0,0],[lx1,0],[lx0,totalH],[lx1,totalH]].map(([lx,ly]) => [
+            tx[0]*lx + tx[2]*ly + tx[4],
+            tx[1]*lx + tx[3]*ly + tx[5]
+          ]);
+          const xs = corners.map(c=>c[0]), ys = corners.map(c=>c[1]);
+          const gx0=Math.min(...xs), gx1=Math.max(...xs), gy0=Math.min(...ys), gy1=Math.max(...ys);
+          words.push({ text: match[0], rectFrac: {
+            x: gx0/viewport.width, y: gy0/viewport.height,
+            w: (gx1-gx0)/viewport.width, h: (gy1-gy0)/viewport.height
+          }});
+        }
       });
     } catch(err){ console.warn('text extraction failed', err); }
   }
