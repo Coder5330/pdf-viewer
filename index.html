@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quickview-v3.6 — PDF Editor</title>
+<title>Quickview-v3.7 — PDF Editor</title>
 <link rel="icon" id="favicon" type="image/svg+xml" href="">
 <script>
   // Defaults to an inline SVG icon (red document + blue "PDF" magnifying
@@ -142,7 +142,7 @@
 <div id="app">
 
   <div id="toolbar">
-    <div class="brand"><span class="dot"></span>Quickview-v3.6<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
+    <div class="brand"><span class="dot"></span>Quickview-v3.7<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
       <svg width="13" height="13" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="#D97757">
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z"/>
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z" transform="rotate(30)"/>
@@ -759,34 +759,54 @@ async function advanceSelectionPage(dir){
   }
 }
 
+// How long the pointer must keep pulling past an exhausted page edge before
+// the page actually turns. Without this a fast drag blows through several
+// pages the moment scrolling bottoms out; the dwell makes the page turn a
+// deliberate act rather than an accident. Reset whenever the drag backs off
+// the edge or a page actually turns.
+const PAGE_TURN_DWELL_MS = 650;
+let edgeHoldSince = null, edgeHoldDir = 0;
+
 function autoScrollStep(){
-  if(!drawing || !selectMode || autoScrollDy === 0){ autoScrollHandle = null; return; }
+  if(!drawing || !selectMode || autoScrollDy === 0){ autoScrollHandle = null; edgeHoldSince = null; return; }
   const main = el('main');
   const maxScroll = main.scrollHeight - main.clientHeight;
-  if(autoScrollDy > 0 && main.scrollTop >= maxScroll - 1){
-    autoScrollHandle = null;
-    advanceSelectionPage(1);
+  const atBottom = autoScrollDy > 0 && main.scrollTop >= maxScroll - 1;
+  const atTop = autoScrollDy < 0 && main.scrollTop <= 1;
+  if(atBottom || atTop){
+    const dir = atBottom ? 1 : -1;
+    if(edgeHoldDir !== dir){ edgeHoldDir = dir; edgeHoldSince = performance.now(); }
+    if(performance.now() - edgeHoldSince >= PAGE_TURN_DWELL_MS){
+      autoScrollHandle = null;
+      edgeHoldSince = null; edgeHoldDir = 0;
+      advanceSelectionPage(dir);
+      return;
+    }
+    // still within the dwell window: keep the selection preview live but
+    // don't turn the page yet
+    if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
+    autoScrollHandle = requestAnimationFrame(autoScrollStep);
     return;
   }
-  if(autoScrollDy < 0 && main.scrollTop <= 1){
-    autoScrollHandle = null;
-    advanceSelectionPage(-1);
-    return;
-  }
+  edgeHoldSince = null; edgeHoldDir = 0;
   main.scrollTop += autoScrollDy;
   if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
   autoScrollHandle = requestAnimationFrame(autoScrollStep);
 }
 function updateAutoScroll(clientY){
   const rect = el('main').getBoundingClientRect();
-  const EDGE = 50, MAXSPEED = 18;
+  const EDGE = 36, MAXSPEED = 18;
+  const prev = autoScrollDy;
   if(clientY > rect.bottom - EDGE) autoScrollDy = MAXSPEED * Math.min(1, (clientY-(rect.bottom-EDGE))/EDGE);
   else if(clientY < rect.top + EDGE) autoScrollDy = -MAXSPEED * Math.min(1, ((rect.top+EDGE)-clientY)/EDGE);
   else autoScrollDy = 0;
+  // backing off the edge (or reversing) restarts the page-turn dwell
+  if(autoScrollDy === 0 || Math.sign(autoScrollDy) !== Math.sign(prev)){ edgeHoldSince = null; edgeHoldDir = 0; }
   if(autoScrollDy !== 0 && autoScrollHandle == null) autoScrollHandle = requestAnimationFrame(autoScrollStep);
 }
 function stopAutoScroll(){
   autoScrollDy = 0;
+  edgeHoldSince = null; edgeHoldDir = 0;
   if(autoScrollHandle != null){ cancelAnimationFrame(autoScrollHandle); autoScrollHandle = null; }
 }
 
