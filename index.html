@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quickview-v3.5 — PDF Editor</title>
+<title>Quickview-v3.6 — PDF Editor</title>
 <link rel="icon" id="favicon" type="image/svg+xml" href="">
 <script>
   // Defaults to an inline SVG icon (red document + blue "PDF" magnifying
@@ -142,7 +142,7 @@
 <div id="app">
 
   <div id="toolbar">
-    <div class="brand"><span class="dot"></span>Quickview-v3.5<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
+    <div class="brand"><span class="dot"></span>Quickview-v3.6<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
       <svg width="13" height="13" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="#D97757">
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z"/>
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z" transform="rotate(30)"/>
@@ -539,6 +539,8 @@ function redrawOverlay(){
   const p = pages[activeIndex];
   if(p.searchHighlights && p.searchHighlights.length) drawSearchHighlights(octx, p.searchHighlights, W, H);
   drawAnnotationsOnCtx(octx, p.annotations, W, H);
+  const carried = carriedSelections.find(s => s.pageIndex === activeIndex);
+  if(carried && carried.lineRects.length) drawTextSelection(octx, carried.lineRects, W, H);
   if(textSelection.pageIndex === activeIndex && textSelection.lineRects.length) drawTextSelection(octx, textSelection.lineRects, W, H);
 }
 
@@ -551,10 +553,26 @@ async function renderAll(){
 let drawing = false, startPt = null, currentPath = null, liveShape = null;
 let selectMode = false, selectOrderedWords = [], selectStartIdx = -1, selectPreviewLines = null;
 let textSelection = { pageIndex: null, words: [], lineRects: [], text: '' };
+// Selections completed on earlier pages during one continuous drag, kept so a
+// drag that auto-advances pages copies everything it crossed rather than only
+// whatever happens to be on the final page. Keyed by page index, in the order
+// the drag visited them.
+let carriedSelections = [];
 
 function clearTextSelection(redraw){
   textSelection = { pageIndex: null, words: [], lineRects: [], text: '' };
+  carriedSelections = [];
   if(redraw !== false && pages.length) redrawOverlay();
+}
+
+// Full selected text across every page the drag covered, in visit order.
+function fullSelectionText(){
+  const parts = carriedSelections.map(s => s.text).filter(Boolean);
+  if(textSelection.text) parts.push(textSelection.text);
+  return parts.join('\n');
+}
+function fullSelectionWordCount(){
+  return carriedSelections.reduce((n,s) => n + s.words.length, 0) + textSelection.words.length;
 }
 
 // Find the word whose line is closest to pt.y, then the closest word on that
@@ -629,17 +647,19 @@ function sortWordsReadingOrder(words){
 }
 
 async function copySelectionToClipboard(){
-  if(!textSelection.text) return;
+  const text = fullSelectionText();
+  if(!text) return;
   try{
-    await navigator.clipboard.writeText(textSelection.text);
+    await navigator.clipboard.writeText(text);
   } catch(e){
     try{
       const ta = document.createElement('textarea');
-      ta.value = textSelection.text; ta.style.position='fixed'; ta.style.opacity='0';
+      ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
       document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
     } catch(err){ toast('Copy failed — no clipboard access.'); return; }
   }
-  toast('Copied ' + textSelection.words.length + ' word(s)');
+  const pageCount = carriedSelections.length + (textSelection.words.length ? 1 : 0);
+  toast('Copied ' + fullSelectionWordCount() + ' word(s)' + (pageCount > 1 ? ' across ' + pageCount + ' pages' : ''));
 }
 
 function fracFromEvent(e){
@@ -691,14 +711,29 @@ let pageAdvancing = false;
 // and keep going, so selecting doesn't just stall at the page boundary. The
 // new page's selection restarts from its top (scrolling down) or bottom
 // (scrolling up) rather than carrying the exact word range over — this app
-// shows one page at a time, so a true single continuous cross-page range
-// isn't modeled; this keeps the drag flowing at the page edge instead.
+// shows one page at a time, so the range is modeled as a per-page selection
+// plus the carried selections from pages the drag already crossed — those stay
+// selected and are included when copying, rather than being lost on advance.
 async function advanceSelectionPage(dir){
   if(!drawing || !selectMode || pageAdvancing) return;
   const newIdx = activeIndex + dir;
   if(newIdx < 0 || newIdx >= pages.length) return;
   pageAdvancing = true;
   try{
+    // Bank whatever is selected on the page we're leaving, so a multi-page
+    // drag copies everything it covered rather than only the last page.
+    if(selectStartIdx >= 0 && selectOrderedWords.length){
+      const endIdx = dir > 0 ? selectOrderedWords.length - 1 : 0;
+      const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
+      const run = selectOrderedWords.slice(a, b+1);
+      if(run.length){
+        const leavingIdx = activeIndex;
+        const existing = carriedSelections.find(s => s.pageIndex === leavingIdx);
+        const entry = { pageIndex: leavingIdx, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
+        if(existing) Object.assign(existing, entry);
+        else carriedSelections.push(entry);
+      }
+    }
     activeIndex = newIdx;
     await renderActivePage();
     if(!drawing || !selectMode) return;
@@ -755,6 +790,35 @@ function stopAutoScroll(){
   if(autoScrollHandle != null){ cancelAnimationFrame(autoScrollHandle); autoScrollHandle = null; }
 }
 
+// Words on the same visual line as the given word index, as an [a,b] range
+// into the reading-order array (used by triple-click line selection).
+function lineRangeAround(orderedWords, idx){
+  const avgH = orderedWords.reduce((s,w)=>s+w.rectFrac.h,0)/orderedWords.length || 0.01;
+  const tol = avgH * 0.6;
+  const cy = orderedWords[idx].rectFrac.y + orderedWords[idx].rectFrac.h/2;
+  let a = idx, b = idx;
+  while(a-1 >= 0 && Math.abs((orderedWords[a-1].rectFrac.y + orderedWords[a-1].rectFrac.h/2) - cy) < tol) a--;
+  while(b+1 < orderedWords.length && Math.abs((orderedWords[b+1].rectFrac.y + orderedWords[b+1].rectFrac.h/2) - cy) < tol) b++;
+  return [a, b];
+}
+
+function commitSelectionRange(orderedWords, a, b, announce){
+  const run = orderedWords.slice(a, b+1);
+  if(!run.length) return;
+  textSelection = { pageIndex: activeIndex, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
+  redrawOverlay();
+  if(announce !== false) toast('Selected ' + fullSelectionWordCount() + ' word(s) — press Ctrl/Cmd+C to copy');
+}
+
+async function selectAllOnPage(){
+  if(!pages.length) return;
+  const words = await ensurePageTextWords(pages[activeIndex]);
+  if(!words.length) return;
+  const ordered = sortWordsReadingOrder(words);
+  carriedSelections = carriedSelections.filter(s => s.pageIndex !== activeIndex);
+  commitSelectionRange(ordered, 0, ordered.length - 1);
+}
+
 async function onPointerDown(e){
   if(!pages.length) return;
   e.preventDefault();
@@ -763,6 +827,20 @@ async function onPointerDown(e){
     const p = pages[activeIndex];
     const words = await ensurePageTextWords(p);
     if(!words.length) return;
+    // detail counts clicks in a rapid sequence: 2 = word, 3+ = whole line,
+    // matching text-selection behavior everywhere else.
+    if(e.detail >= 2 && !e.shiftKey){
+      const ordered = sortWordsReadingOrder(words);
+      const idx = nearestWordIndex(ordered, pt);
+      if(idx >= 0){
+        carriedSelections = carriedSelections.filter(s => s.pageIndex !== activeIndex);
+        const [a, b] = e.detail >= 3 ? lineRangeAround(ordered, idx) : [idx, idx];
+        textSelectionAnchor = { pageIndex: activeIndex, idx: a };
+        commitSelectionRange(ordered, a, b);
+      }
+      drawing = false; selectMode = false;
+      return;
+    }
     drawing = true; startPt = pt; selectMode = true;
     selectOrderedWords = sortWordsReadingOrder(words);
     if(e.shiftKey && textSelectionAnchor.pageIndex === activeIndex && textSelectionAnchor.idx >= 0){
@@ -771,6 +849,9 @@ async function onPointerDown(e){
       selectStartIdx = textSelectionAnchor.idx;
       selectIsShiftExtend = true;
     } else {
+      // a fresh drag starts a new selection — drop anything carried from a
+      // previous multi-page drag so old pages don't stay highlighted
+      carriedSelections = [];
       selectStartIdx = nearestWordIndex(selectOrderedWords, pt);
       textSelectionAnchor = { pageIndex: activeIndex, idx: selectStartIdx };
       selectIsShiftExtend = false;
@@ -867,7 +948,8 @@ async function onPointerUp(e){
       const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
       const run = selectOrderedWords.slice(a, b+1);
       textSelection = { pageIndex: activeIndex, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
-      toast('Selected ' + run.length + ' word(s) — press Ctrl/Cmd+C to copy');
+      const pageCount = carriedSelections.length + 1;
+      toast('Selected ' + fullSelectionWordCount() + ' word(s)' + (pageCount > 1 ? ' across ' + pageCount + ' pages' : '') + ' — press Ctrl/Cmd+C to copy');
     } else {
       clearTextSelection(false);
     }
@@ -1425,8 +1507,9 @@ window.addEventListener('keydown', e => {
   if((e.metaKey||e.ctrlKey) && (e.key==='y' || (e.key==='z'&&e.shiftKey))){ e.preventDefault(); redo(); }
   if((e.metaKey||e.ctrlKey) && e.key==='p'){ e.preventDefault(); el('printBtn').click(); }
   if((e.metaKey||e.ctrlKey) && e.key==='s'){ e.preventDefault(); el('saveBtn').click(); }
-  if((e.metaKey||e.ctrlKey) && e.key==='c' && textSelection.words.length){ e.preventDefault(); copySelectionToClipboard(); }
-  if(e.key === 'Escape' && textSelection.words.length){ clearTextSelection(); }
+  if((e.metaKey||e.ctrlKey) && e.key==='c' && fullSelectionWordCount()){ e.preventDefault(); copySelectionToClipboard(); }
+  if((e.metaKey||e.ctrlKey) && e.key==='a' && currentTool==='select'){ e.preventDefault(); selectAllOnPage(); }
+  if(e.key === 'Escape' && fullSelectionWordCount()){ clearTextSelection(); }
 });
 </script>
 </body>
