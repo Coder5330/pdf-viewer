@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quickview-v3.8 — PDF Editor</title>
+<title>Quickview-v4.0 — PDF Editor</title>
 <link rel="icon" id="favicon" type="image/svg+xml" href="">
 <script>
   // Defaults to an inline SVG icon (red document + blue "PDF" magnifying
@@ -79,14 +79,16 @@
   #addPageBtnWrap button:hover{border-color:var(--accent);color:var(--accent);}
 
   #main{flex:1;overflow:auto;display:flex;flex-direction:column;align-items:center;padding:26px 16px 60px;position:relative;}
-  #pageViewport{position:relative;background:var(--paper);box-shadow:0 1px 3px rgba(0,0,0,.15),0 6px 18px rgba(0,0,0,.1);}
-  #baseCanvas{display:block;}
-  #overlayCanvas{position:absolute;top:0;left:0;touch-action:none;}
-  #overlayCanvas.tool-pen,#overlayCanvas.tool-highlighter{cursor:crosshair;}
-  #overlayCanvas.tool-rect,#overlayCanvas.tool-ellipse{cursor:crosshair;}
-  #overlayCanvas.tool-text{cursor:text;}
-  #overlayCanvas.tool-eraser{cursor:cell;}
-  #overlayCanvas.tool-select{cursor:text;}
+  #pagesContainer{display:flex;flex-direction:column;align-items:center;gap:18px;}
+  .page-viewport{position:relative;background:var(--paper);box-shadow:0 1px 3px rgba(0,0,0,.15),0 6px 18px rgba(0,0,0,.1);}
+  .base-canvas{display:block;}
+  .overlay-canvas{position:absolute;top:0;left:0;touch-action:none;}
+  .overlay-canvas.tool-pen,.overlay-canvas.tool-highlighter{cursor:crosshair;}
+  .overlay-canvas.tool-rect,.overlay-canvas.tool-ellipse{cursor:crosshair;}
+  .overlay-canvas.tool-text{cursor:text;}
+  .overlay-canvas.tool-eraser{cursor:cell;}
+  .overlay-canvas.tool-select{cursor:text;}
+  .page-label{position:absolute;left:0;top:-17px;font-size:10.5px;color:var(--muted);}
 
   /* Drop zone */
   #dropzone{flex:1;display:flex;align-items:center;justify-content:center;padding:40px;}
@@ -111,7 +113,7 @@
 
   .text-editor-input{position:absolute;outline:1.5px dashed var(--accent);background:rgba(255,255,255,.7);padding:2px 4px;white-space:pre-wrap;min-width:14px;z-index:10;font-family:-apple-system,Arial,sans-serif;font-weight:600;line-height:1.25;cursor:text;border-radius:2px;}
 
-  #formFieldsLayer{position:absolute;top:0;left:0;pointer-events:none;z-index:6;}
+  .form-fields-layer{position:absolute;top:0;left:0;pointer-events:none;z-index:6;}
   .form-field-input{position:absolute;pointer-events:auto;box-sizing:border-box;border:1.5px solid var(--accent);background:rgba(255,255,255,.85);font-family:inherit;padding:1px 3px;resize:none;border-radius:2px;}
   .form-field-input[type=checkbox]{padding:0;}
 
@@ -142,7 +144,7 @@
 <div id="app">
 
   <div id="toolbar">
-    <div class="brand"><span class="dot"></span>Quickview-v3.8<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
+    <div class="brand"><span class="dot"></span>Quickview-v4.0<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
       <svg width="13" height="13" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="#D97757">
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z"/>
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z" transform="rotate(30)"/>
@@ -217,11 +219,7 @@
         </div>
       </div>
       <div id="loading"><div class="spinner"></div><div id="loadingText">Loading…</div></div>
-      <div id="pageViewport" style="display:none;">
-        <canvas id="baseCanvas"></canvas>
-        <canvas id="overlayCanvas"></canvas>
-        <div id="formFieldsLayer"></div>
-      </div>
+      <div id="pagesContainer" style="display:none;"></div>
     </div>
   </div>
 
@@ -331,17 +329,17 @@ async function openMain(file){
   docs = []; pages = []; history=[]; redoStack=[]; activeIndex = 0;
   searchMatches = []; searchCursor = -1; el('searchInput').value=''; el('searchCount').textContent='';
   formDocIdx = null; formFieldsByPage = {}; formValues = {}; formFieldsVisible = true;
-  textSelectionAnchor = { pageIndex: null, idx: -1 }; clearTextSelection(false);
+  textSelectionAnchor = { pageIndex: -1, idx: -1 }; clearTextSelection(false);
   const newPages = await loadFile(file, true);
   if(!newPages){ setLoading(false); return; }
   pages = newPages;
   showEditorChrome(true);
   el('pageCount').textContent = pages.length;
-  el('pageViewport').style.display = '';
+  el('pagesContainer').style.display = '';
   await renderThumbnails();
   await detectForm(0);
   el('formToggleBtn').style.display = formDocIdx!=null ? '' : 'none';
-  await renderActivePage();
+  await buildPageViews();
   setLoading(false);
   updateUndoRedoButtons();
 }
@@ -355,7 +353,8 @@ async function insertFile(file){
   pages.splice(activeIndex+1, 0, ...newPages);
   activeIndex = activeIndex+1;
   await renderThumbnails();
-  await renderActivePage();
+  await buildPageViews();
+  scrollToPage(activeIndex);
   toast(newPages.length + ' page(s) merged in');
 }
 
@@ -441,20 +440,20 @@ async function renderThumbnails(){
 
     wrap.addEventListener('click', e => {
       if(e.target.dataset.act) return;
-      activeIndex = i; renderActivePage(); highlightActiveThumb();
+      activeIndex = i; scrollToPage(i, true); highlightActiveThumb();
     });
-    actions.querySelector('[data-act=rotate]').onclick = () => { snapshot(); p.rotation = (p.rotation+90)%360; p.textWords = null; renderThumbnails(); if(i===activeIndex) renderActivePage(); };
+    actions.querySelector('[data-act=rotate]').onclick = async () => { snapshot(); p.rotation = (p.rotation+90)%360; p.textWords = null; p._orderedWords = null; await renderThumbnails(); const keep = activeIndex; await buildPageViews(); scrollToPage(keep); };
     actions.querySelector('[data-act=dup]').onclick = () => {
       snapshot();
       const clone = JSON.parse(JSON.stringify(p)); clone.uid = uidCounter++;
       pages.splice(i+1,0,clone); activeIndex = i+1;
-      renderThumbnails(); renderActivePage();
+      renderThumbnails(); renderAll();
     };
     actions.querySelector('[data-act=del]').onclick = () => {
       if(pages.length === 1){ toast("Can't delete the only page"); return; }
       snapshot();
       pages.splice(i,1); clampActiveIndex();
-      renderThumbnails(); renderActivePage();
+      renderThumbnails(); renderAll();
     };
     wrap.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', i); });
     wrap.addEventListener('dragover', e => { e.preventDefault(); wrap.classList.add('drag-over'); });
@@ -468,7 +467,7 @@ async function renderThumbnails(){
       const [moved] = pages.splice(from,1);
       pages.splice(to,0,moved);
       if(activeIndex===from) activeIndex = to;
-      renderThumbnails(); renderActivePage();
+      renderThumbnails(); renderAll();
     });
 
     sb.appendChild(wrap);
@@ -479,7 +478,7 @@ async function renderThumbnails(){
     snapshot();
     const np = { uid: uidCounter++, kind:'blank', blankSize:{w:595,h:842}, rotation:0, annotations:[] };
     pages.splice(activeIndex+1,0,np); activeIndex = activeIndex+1;
-    renderThumbnails(); renderActivePage();
+    renderThumbnails(); renderAll();
   };
   sb.appendChild(addWrap);
   el('pageCount').textContent = pages.length;
@@ -490,28 +489,136 @@ function highlightActiveThumb(){
   if(t && t.classList) t.classList.add('active-thumb');
 }
 
-async function renderActivePage(){
-  if(!pages.length) return;
-  cleanupTextEditor(false);
-  clampActiveIndex();
-  const p = pages[activeIndex];
+/* ---------- Continuous multi-page view ----------
+   Every page lives in the scroll container at once (Word-style), so
+   scrolling flows between pages instead of snapping one page at a time.
+   Each page owns its own base canvas, overlay canvas and form-field layer;
+   `activeIndex` is derived from whichever page is most visible. */
+
+function viewportFor(idx){ return el('pagesContainer').children[idx] || null; }
+function overlayFor(idx){ const v = viewportFor(idx); return v ? v.querySelector('.overlay-canvas') : null; }
+function baseFor(idx){ const v = viewportFor(idx); return v ? v.querySelector('.base-canvas') : null; }
+function formLayerFor(idx){ const v = viewportFor(idx); return v ? v.querySelector('.form-fields-layer') : null; }
+function activeOverlay(){ return overlayFor(activeIndex); }
+function pageIdxFromNode(node){
+  const v = node && node.closest ? node.closest('.page-viewport') : null;
+  return v ? parseInt(v.dataset.idx, 10) : -1;
+}
+
+// Build (or rebuild) the stack of page viewports. Canvases are sized
+// immediately so the scroll height is correct, but pixels are painted lazily
+// by renderVisiblePages() to keep large documents responsive.
+async function buildPageViews(){
+  const container = el('pagesContainer');
+  container.innerHTML = '';
+  for(let i=0;i<pages.length;i++){
+    const { viewport } = await getBaseViewport(pages[i], zoom);
+    const wrap = document.createElement('div');
+    wrap.className = 'page-viewport';
+    wrap.dataset.idx = i;
+    wrap.style.width = viewport.width+'px';
+    wrap.style.height = viewport.height+'px';
+    const label = document.createElement('div');
+    label.className = 'page-label';
+    label.textContent = 'Page ' + (i+1);
+    const base = document.createElement('canvas'); base.className = 'base-canvas';
+    const overlay = document.createElement('canvas'); overlay.className = 'overlay-canvas tool-'+currentTool;
+    const dpr = window.devicePixelRatio || 1;
+    [base, overlay].forEach(c => {
+      c.width = Math.round(viewport.width*dpr); c.height = Math.round(viewport.height*dpr);
+      c.style.width = viewport.width+'px'; c.style.height = viewport.height+'px';
+    });
+    const formLayer = document.createElement('div');
+    formLayer.className = 'form-fields-layer';
+    formLayer.style.width = viewport.width+'px';
+    formLayer.style.height = viewport.height+'px';
+    wrap.appendChild(label); wrap.appendChild(base); wrap.appendChild(overlay); wrap.appendChild(formLayer);
+    ['mousedown','touchstart'].forEach(ev => overlay.addEventListener(ev, onPointerDown, {passive:false}));
+    container.appendChild(wrap);
+    pages[i]._painted = false;
+  }
+  await renderVisiblePages();
+  updateActiveFromScroll();
+}
+
+// Paint the pages currently in (or near) view.
+async function renderVisiblePages(){
+  const main = el('main');
+  const mainRect = main.getBoundingClientRect();
+  const margin = mainRect.height; // one screen of lookahead each way
+  for(let i=0;i<pages.length;i++){
+    const wrap = viewportFor(i);
+    if(!wrap) continue;
+    const r = wrap.getBoundingClientRect();
+    const near = r.bottom > mainRect.top - margin && r.top < mainRect.bottom + margin;
+    if(near && !pages[i]._painted){
+      pages[i]._painted = true;
+      await paintPage(i);
+    }
+  }
+}
+
+async function paintPage(idx){
+  const p = pages[idx];
+  const base = baseFor(idx);
+  if(!base) return;
   const { viewport, page } = await getBaseViewport(p, zoom);
   const dpr = window.devicePixelRatio || 1;
-  const base = el('baseCanvas'), overlay = el('overlayCanvas');
-  [base, overlay].forEach(c => {
-    c.width = Math.round(viewport.width*dpr); c.height = Math.round(viewport.height*dpr);
-    c.style.width = viewport.width+'px'; c.style.height = viewport.height+'px';
-  });
-  const bctx = base.getContext('2d'); bctx.setTransform(dpr,0,0,dpr,0,0);
+  const bctx = base.getContext('2d');
+  bctx.setTransform(dpr,0,0,dpr,0,0);
   if(page){ await page.render({ canvasContext: bctx, viewport }).promise; }
   else { bctx.fillStyle = '#fff'; bctx.fillRect(0,0,viewport.width,viewport.height); }
-  redrawOverlay();
-  await renderFormFieldOverlay();
-  ensurePageTextWords(p).catch(()=>{}); // warm the cache so the highlighter tool can snap to words immediately
+  redrawOverlayFor(idx);
+  await renderFormFieldOverlay(idx);
+  ensurePageTextWords(p).catch(()=>{}); // warm the word cache for select/highlight
+}
+
+// Which page is most visible right now drives the page number, thumbnail
+// highlight, and any tool that acts on "the current page".
+function updateActiveFromScroll(){
+  if(!pages.length) return;
+  const main = el('main');
+  const mainRect = main.getBoundingClientRect();
+  const mid = mainRect.top + mainRect.height/2;
+  let best = activeIndex, bestDist = Infinity;
+  for(let i=0;i<pages.length;i++){
+    const wrap = viewportFor(i);
+    if(!wrap) continue;
+    const r = wrap.getBoundingClientRect();
+    const dist = Math.abs((r.top + r.height/2) - mid);
+    if(dist < bestDist){ bestDist = dist; best = i; }
+  }
+  if(best !== activeIndex){
+    activeIndex = best;
+    highlightActiveThumb();
+  }
   el('pageInput').value = activeIndex+1;
   el('zoomLevel').textContent = Math.round((zoom/1.25)*100)+'%';
   el('prevBtn').disabled = activeIndex===0;
   el('nextBtn').disabled = activeIndex===pages.length-1;
+}
+
+function scrollToPage(idx, smooth){
+  const wrap = viewportFor(idx);
+  if(!wrap) return;
+  const main = el('main');
+  main.scrollTo({ top: wrap.offsetTop - main.offsetTop - 12, behavior: smooth ? 'smooth' : 'auto' });
+}
+
+el('main').addEventListener('scroll', () => {
+  updateActiveFromScroll();
+  renderVisiblePages();
+}, { passive: true });
+
+// Kept for callers that used to re-render the single active page; now it
+// repaints the visible run and refreshes the active-page chrome.
+async function renderActivePage(){
+  if(!pages.length) return;
+  cleanupTextEditor(false);
+  clampActiveIndex();
+  await renderVisiblePages();
+  redrawOverlayFor(activeIndex);
+  updateActiveFromScroll();
   highlightActiveThumb();
 }
 
@@ -529,24 +636,34 @@ function drawTextSelection(ctx, lineRects, W, H){
   ctx.restore();
 }
 
-function redrawOverlay(){
-  const overlay = el('overlayCanvas');
+function redrawOverlayFor(idx){
+  const overlay = overlayFor(idx);
+  if(!overlay) return;
+  const p = pages[idx];
+  if(!p) return;
   const dpr = window.devicePixelRatio || 1;
   const octx = overlay.getContext('2d');
   octx.setTransform(dpr,0,0,dpr,0,0);
   const W = overlay.width/dpr, H = overlay.height/dpr;
   octx.clearRect(0,0,W,H);
-  const p = pages[activeIndex];
   if(p.searchHighlights && p.searchHighlights.length) drawSearchHighlights(octx, p.searchHighlights, W, H);
   drawAnnotationsOnCtx(octx, p.annotations, W, H);
-  const carried = carriedSelections.find(s => s.pageIndex === activeIndex);
+  const carried = carriedSelections.find(s => s.pageIndex === idx);
   if(carried && carried.lineRects.length) drawTextSelection(octx, carried.lineRects, W, H);
-  if(textSelection.pageIndex === activeIndex && textSelection.lineRects.length) drawTextSelection(octx, textSelection.lineRects, W, H);
+  if(textSelection.pageIndex === idx && textSelection.lineRects.length) drawTextSelection(octx, textSelection.lineRects, W, H);
+}
+
+// Repaint every page's overlay (selection spans pages, so a change on one can
+// affect the highlight shown on others).
+function redrawOverlay(){
+  for(let i=0;i<pages.length;i++) redrawOverlayFor(i);
 }
 
 async function renderAll(){
   await renderThumbnails();
-  await renderActivePage();
+  const keep = activeIndex;
+  await buildPageViews();
+  scrollToPage(keep);
 }
 
 /* ---------- Annotation interaction ---------- */
@@ -562,6 +679,8 @@ let carriedSelections = [];
 function clearTextSelection(redraw){
   textSelection = { pageIndex: null, words: [], lineRects: [], text: '' };
   carriedSelections = [];
+  textSelectionAnchor = { pageIndex: -1, idx: -1 };
+  selectFocus = { pageIndex: -1, idx: -1 };
   if(redraw !== false && pages.length) redrawOverlay();
 }
 
@@ -662,20 +781,43 @@ async function copySelectionToClipboard(){
   toast('Copied ' + fullSelectionWordCount() + ' word(s)' + (pageCount > 1 ? ' across ' + pageCount + ' pages' : ''));
 }
 
-function fracFromEvent(e){
-  const rect = el('overlayCanvas').getBoundingClientRect();
+// Fractional coords within a given page (defaults to the interaction page).
+function fracFromEvent(e, idx){
+  const overlay = overlayFor(idx == null ? interactionPageIdx : idx) || activeOverlay();
+  if(!overlay) return { x:0, y:0 };
+  const rect = overlay.getBoundingClientRect();
   const cx = (e.touches ? e.touches[0].clientX : e.clientX);
   const cy = (e.touches ? e.touches[0].clientY : e.clientY);
   return { x: Math.min(1,Math.max(0,(cx-rect.left)/rect.width)), y: Math.min(1,Math.max(0,(cy-rect.top)/rect.height)) };
 }
+
+// The page a drag started on — annotation strokes belong to it even if the
+// pointer wanders over a neighbouring page mid-gesture.
+let interactionPageIdx = 0;
+
+// Which page a raw viewport point falls on (clamped to the nearest page when
+// the pointer is in the gap between pages).
+function pageIdxAtClientY(clientY){
+  let best = interactionPageIdx, bestDist = Infinity;
+  for(let i=0;i<pages.length;i++){
+    const wrap = viewportFor(i);
+    if(!wrap) continue;
+    const r = wrap.getBoundingClientRect();
+    if(clientY >= r.top && clientY <= r.bottom) return i;
+    const dist = clientY < r.top ? r.top - clientY : clientY - r.bottom;
+    if(dist < bestDist){ bestDist = dist; best = i; }
+  }
+  return best;
+}
 function currentAnnColor(){ return el('colorPicker').value; }
 function currentAnnWidthFrac(){
-  const overlay = el('overlayCanvas');
-  return parseFloat(el('widthSlider').value) / (overlay.getBoundingClientRect().width || 800);
+  const overlay = overlayFor(interactionPageIdx) || activeOverlay();
+  const w = overlay ? overlay.getBoundingClientRect().width : 0;
+  return parseFloat(el('widthSlider').value) / (w || 800);
 }
 
 let wordSelectMode = false, wordSelectRect = null;
-let textSelectionAnchor = { pageIndex: null, idx: -1 }, selectIsShiftExtend = false;
+let textSelectionAnchor = { pageIndex: -1, idx: -1 }, selectIsShiftExtend = false;
 let lastClientX = null, lastClientY = null, autoScrollDy = 0, autoScrollHandle = null;
 
 function rectsIntersect(a, b){
@@ -689,7 +831,9 @@ function rectContainsPt(r, pt){
 // by mousemove and by the auto-scroll loop, since scrolling moves the page
 // under a pointer that hasn't itself moved).
 function updateSelectionPreviewFromClientPt(clientX, clientY){
-  const rect = el('overlayCanvas').getBoundingClientRect();
+  const overlay = overlayFor(interactionPageIdx);
+  if(!overlay) return { x:0, y:0 };
+  const rect = overlay.getBoundingClientRect();
   const pt = { x: Math.min(1,Math.max(0,(clientX-rect.left)/rect.width)), y: Math.min(1,Math.max(0,(clientY-rect.top)/rect.height)) };
   if(selectStartIdx >= 0 && selectOrderedWords.length){
     const endIdx = nearestWordIndex(selectOrderedWords, pt);
@@ -697,158 +841,94 @@ function updateSelectionPreviewFromClientPt(clientX, clientY){
     const run = selectOrderedWords.slice(a, b+1);
     selectPreviewLines = mergeSelectionIntoLines(run);
   }
-  const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
+  const dpr = window.devicePixelRatio||1;
   const W = overlay.width/dpr, H = overlay.height/dpr;
   redrawOverlay();
   if(selectPreviewLines && selectPreviewLines.length) drawTextSelection(overlay.getContext('2d'), selectPreviewLines, W, H);
   return pt;
 }
 
-let pageAdvancing = false;
-
-// When a drag-scroll hits the bottom (or top) of the current page's content
-// while still trying to scroll further, move to the next (or previous) page
-// and keep going, so selecting doesn't just stall at the page boundary. The
-// new page's selection restarts from its top (scrolling down) or bottom
-// (scrolling up) rather than carrying the exact word range over — this app
-// shows one page at a time, so the range is modeled as a per-page selection
-// plus the carried selections from pages the drag already crossed — those stay
-// selected and are included when copying, rather than being lost on advance.
-async function advanceSelectionPage(dir){
-  if(!drawing || !selectMode || pageAdvancing) return;
-  const newIdx = activeIndex + dir;
-  if(newIdx < 0 || newIdx >= pages.length) return;
-  pageAdvancing = true;
-  try{
-    // Bank whatever is selected on the page we're leaving, so a multi-page
-    // drag copies everything it covered rather than only the last page.
-    if(selectStartIdx >= 0 && selectOrderedWords.length){
-      const endIdx = dir > 0 ? selectOrderedWords.length - 1 : 0;
-      const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
-      const run = selectOrderedWords.slice(a, b+1);
-      if(run.length){
-        const leavingIdx = activeIndex;
-        const existing = carriedSelections.find(s => s.pageIndex === leavingIdx);
-        const entry = { pageIndex: leavingIdx, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
-        if(existing) Object.assign(existing, entry);
-        else carriedSelections.push(entry);
-      }
-    }
-    activeIndex = newIdx;
-    await renderActivePage();
-    if(!drawing || !selectMode) return;
-    const p = pages[activeIndex];
-    const words = await ensurePageTextWords(p);
-    if(!drawing || !selectMode) return;
-    selectOrderedWords = sortWordsReadingOrder(words);
-    selectPreviewLines = null;
-    if(selectOrderedWords.length){
-      selectStartIdx = dir > 0 ? 0 : selectOrderedWords.length - 1;
-      textSelectionAnchor = { pageIndex: activeIndex, idx: selectStartIdx };
-    } else {
-      selectStartIdx = -1;
-    }
-    const main = el('main');
-    main.scrollTop = dir > 0 ? 0 : (main.scrollHeight - main.clientHeight);
-    if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
-  } finally {
-    pageAdvancing = false;
-  }
-  if(drawing && selectMode && autoScrollDy !== 0 && autoScrollHandle == null && !pageAdvancing){
-    autoScrollHandle = requestAnimationFrame(autoScrollStep);
-  }
-}
-
-// How long the pointer must keep pulling past an exhausted page edge before
-// the page actually turns. The FIRST turn of a drag takes the full dwell, so
-// a quick drag to the bottom doesn't flip pages by accident; once you've
-// committed to one turn the intent is clear, so each subsequent turn in the
-// same continuous drag gets faster (down to a floor). Backing off the edge or
-// ending the drag resets the streak.
-const PAGE_TURN_DWELL_MS = 650;
-const PAGE_TURN_DWELL_MIN_MS = 130;
-const PAGE_TURN_DWELL_DECAY = 0.45;
-let edgeHoldSince = null, edgeHoldDir = 0, pageTurnStreak = 0;
-
-function currentPageTurnDwell(){
-  return Math.max(PAGE_TURN_DWELL_MIN_MS, PAGE_TURN_DWELL_MS * Math.pow(PAGE_TURN_DWELL_DECAY, pageTurnStreak));
-}
-
+/* ---------- Auto-scroll while dragging a selection ----------
+   With every page stacked in one scroller there are no page "turns" any more:
+   dragging past the edge just keeps scrolling, and the selection extends onto
+   whatever page scrolls into view. */
 function autoScrollStep(){
-  if(!drawing || !selectMode || autoScrollDy === 0){ autoScrollHandle = null; edgeHoldSince = null; return; }
+  if(!drawing || autoScrollDy === 0){ autoScrollHandle = null; return; }
   const main = el('main');
   const maxScroll = main.scrollHeight - main.clientHeight;
-  const atBottom = autoScrollDy > 0 && main.scrollTop >= maxScroll - 1;
-  const atTop = autoScrollDy < 0 && main.scrollTop <= 1;
-  if(atBottom || atTop){
-    const dir = atBottom ? 1 : -1;
-    if(edgeHoldDir !== dir){ edgeHoldDir = dir; edgeHoldSince = performance.now(); }
-    if(performance.now() - edgeHoldSince >= currentPageTurnDwell()){
-      autoScrollHandle = null;
-      edgeHoldSince = null; edgeHoldDir = 0;
-      pageTurnStreak++;
-      advanceSelectionPage(dir);
-      return;
-    }
-    // still within the dwell window: keep the selection preview live but
-    // don't turn the page yet
-    if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
-    autoScrollHandle = requestAnimationFrame(autoScrollStep);
-    return;
-  }
-  edgeHoldSince = null; edgeHoldDir = 0;
-  main.scrollTop += autoScrollDy;
-  if(lastClientX != null) updateSelectionPreviewFromClientPt(lastClientX, lastClientY);
+  const next = Math.max(0, Math.min(maxScroll, main.scrollTop + autoScrollDy));
+  if(next === main.scrollTop){ autoScrollHandle = null; return; } // hit the document end
+  main.scrollTop = next;
+  renderVisiblePages();
+  if(selectMode && lastClientX != null) extendSelectionToClientPt(lastClientX, lastClientY);
   autoScrollHandle = requestAnimationFrame(autoScrollStep);
 }
 function updateAutoScroll(clientY){
   const rect = el('main').getBoundingClientRect();
-  const EDGE = 36, MAXSPEED = 18;
-  const prev = autoScrollDy;
+  const EDGE = 44, MAXSPEED = 22;
   if(clientY > rect.bottom - EDGE) autoScrollDy = MAXSPEED * Math.min(1, (clientY-(rect.bottom-EDGE))/EDGE);
   else if(clientY < rect.top + EDGE) autoScrollDy = -MAXSPEED * Math.min(1, ((rect.top+EDGE)-clientY)/EDGE);
   else autoScrollDy = 0;
-  // backing off the edge (or reversing) restarts the page-turn dwell
-  if(autoScrollDy === 0 || Math.sign(autoScrollDy) !== Math.sign(prev)){ edgeHoldSince = null; edgeHoldDir = 0; }
-  // reversing direction abandons the run of turns, so start over at full dwell
-  if(prev !== 0 && autoScrollDy !== 0 && Math.sign(autoScrollDy) !== Math.sign(prev)) pageTurnStreak = 0;
   if(autoScrollDy !== 0 && autoScrollHandle == null) autoScrollHandle = requestAnimationFrame(autoScrollStep);
 }
 function stopAutoScroll(){
   autoScrollDy = 0;
-  edgeHoldSince = null; edgeHoldDir = 0; pageTurnStreak = 0;
   if(autoScrollHandle != null){ cancelAnimationFrame(autoScrollHandle); autoScrollHandle = null; }
 }
 
-/* ---------- Wheel scrolling across page boundaries ---------- */
-// Scrolling past the bottom (or top) of a page moves to the next (previous)
-// one, so the wheel walks the whole document instead of dead-ending at each
-// page. Needs a small dwell too, so one flick doesn't skip several pages.
-let wheelEdgeSince = null, wheelEdgeDir = 0, wheelTurnAt = 0;
-const WHEEL_PAGE_DWELL_MS = 220, WHEEL_PAGE_COOLDOWN_MS = 320;
+/* ---------- Cross-page text selection ----------
+   The anchor is a (page, word) pair and so is the focus; everything between
+   them — including whole pages in the middle — is selected, which is what a
+   continuous document view lets us finally do properly. */
+let selectFocus = { pageIndex: -1, idx: -1 };
 
-el('main').addEventListener('wheel', e => {
-  if(!pages.length) return;
-  const main = el('main');
-  const maxScroll = main.scrollHeight - main.clientHeight;
-  const dir = e.deltaY > 0 ? 1 : (e.deltaY < 0 ? -1 : 0);
-  if(!dir) return;
-  const atEdge = dir > 0 ? main.scrollTop >= maxScroll - 1 : main.scrollTop <= 1;
-  if(!atEdge){ wheelEdgeSince = null; wheelEdgeDir = 0; return; }
-  const nextIdx = activeIndex + dir;
-  if(nextIdx < 0 || nextIdx >= pages.length){ wheelEdgeSince = null; wheelEdgeDir = 0; return; }
-  const now = performance.now();
-  if(wheelEdgeDir !== dir){ wheelEdgeDir = dir; wheelEdgeSince = now; return; }
-  if(now - wheelTurnAt < WHEEL_PAGE_COOLDOWN_MS) return;
-  if(now - wheelEdgeSince < WHEEL_PAGE_DWELL_MS) return;
-  wheelTurnAt = now; wheelEdgeSince = null; wheelEdgeDir = 0;
-  activeIndex = nextIdx;
-  renderActivePage().then(() => {
-    // land at the top when moving forward, the bottom when moving back, so
-    // the content flows continuously in the direction you're scrolling
-    main.scrollTop = dir > 0 ? 0 : (main.scrollHeight - main.clientHeight);
-  });
-}, { passive: true });
+async function wordsForPage(idx){
+  const p = pages[idx];
+  if(!p) return [];
+  if(p._orderedWords && p._orderedWordsZoomToken === p.textWords) return p._orderedWords;
+  const words = await ensurePageTextWords(p);
+  p._orderedWords = sortWordsReadingOrder(words);
+  p._orderedWordsZoomToken = p.textWords;
+  return p._orderedWords;
+}
+
+// Build the selection spanning anchor -> focus and paint every page it covers.
+function applyCrossPageSelection(anchor, focus){
+  if(anchor.pageIndex < 0 || focus.pageIndex < 0) return;
+  let a = anchor, b = focus;
+  if(b.pageIndex < a.pageIndex || (b.pageIndex === a.pageIndex && b.idx < a.idx)){ a = focus; b = anchor; }
+  carriedSelections = [];
+  textSelection = { pageIndex: null, words: [], lineRects: [], text: '' };
+  for(let i = a.pageIndex; i <= b.pageIndex; i++){
+    const ordered = pages[i] && pages[i]._orderedWords;
+    if(!ordered || !ordered.length) continue;
+    const from = (i === a.pageIndex) ? a.idx : 0;
+    const to   = (i === b.pageIndex) ? b.idx : ordered.length - 1;
+    const run = ordered.slice(Math.max(0,from), Math.min(ordered.length-1,to) + 1);
+    if(!run.length) continue;
+    const entry = { pageIndex: i, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
+    if(i === b.pageIndex) textSelection = entry;
+    else carriedSelections.push(entry);
+  }
+  redrawOverlay();
+}
+
+// Move the selection's focus end to a raw viewport point, loading that page's
+// words on demand so a drag can run onto pages that were never visited.
+async function extendSelectionToClientPt(clientX, clientY){
+  if(!selectMode) return;
+  const idx = pageIdxAtClientY(clientY);
+  const ordered = await wordsForPage(idx);
+  if(!ordered.length) return;
+  const overlay = overlayFor(idx);
+  if(!overlay) return;
+  const r = overlay.getBoundingClientRect();
+  const pt = { x: Math.min(1,Math.max(0,(clientX-r.left)/r.width)), y: Math.min(1,Math.max(0,(clientY-r.top)/r.height)) };
+  const wIdx = nearestWordIndex(ordered, pt);
+  if(wIdx < 0) return;
+  selectFocus = { pageIndex: idx, idx: wIdx };
+  applyCrossPageSelection(textSelectionAnchor, selectFocus);
+}
 
 // Words on the same visual line as the given word index, as an [a,b] range
 // into the reading-order array (used by triple-click line selection).
@@ -862,48 +942,53 @@ function lineRangeAround(orderedWords, idx){
   return [a, b];
 }
 
-function commitSelectionRange(orderedWords, a, b, announce){
+function commitSelectionRange(orderedWords, a, b, announce, pageIdx){
   const run = orderedWords.slice(a, b+1);
   if(!run.length) return;
-  textSelection = { pageIndex: activeIndex, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
+  const target = pageIdx == null ? activeIndex : pageIdx;
+  textSelection = { pageIndex: target, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
   redrawOverlay();
   if(announce !== false) toast('Selected ' + fullSelectionWordCount() + ' word(s) — press Ctrl/Cmd+C to copy');
 }
 
 async function selectAllOnPage(){
   if(!pages.length) return;
-  const words = await ensurePageTextWords(pages[activeIndex]);
-  if(!words.length) return;
-  const ordered = sortWordsReadingOrder(words);
-  carriedSelections = carriedSelections.filter(s => s.pageIndex !== activeIndex);
-  commitSelectionRange(ordered, 0, ordered.length - 1);
+  const ordered = await wordsForPage(activeIndex);
+  if(!ordered.length) return;
+  carriedSelections = [];
+  commitSelectionRange(ordered, 0, ordered.length - 1, true, activeIndex);
 }
 
 async function onPointerDown(e){
   if(!pages.length) return;
   e.preventDefault();
-  const pt = fracFromEvent(e);
+  // the gesture belongs to the page it started on, not whichever page happens
+  // to be the most visible one
+  const startedOn = pageIdxFromNode(e.target);
+  interactionPageIdx = startedOn >= 0 ? startedOn : activeIndex;
+  const pIdx = interactionPageIdx;
+  const pt = fracFromEvent(e, pIdx);
   if(currentTool === 'select'){
-    const p = pages[activeIndex];
+    const p = pages[pIdx];
     const words = await ensurePageTextWords(p);
     if(!words.length) return;
     // detail counts clicks in a rapid sequence: 2 = word, 3+ = whole line,
     // matching text-selection behavior everywhere else.
     if(e.detail >= 2 && !e.shiftKey){
-      const ordered = sortWordsReadingOrder(words);
+      const ordered = await wordsForPage(pIdx);
       const idx = nearestWordIndex(ordered, pt);
       if(idx >= 0){
-        carriedSelections = carriedSelections.filter(s => s.pageIndex !== activeIndex);
+        carriedSelections = [];
         const [a, b] = e.detail >= 3 ? lineRangeAround(ordered, idx) : [idx, idx];
-        textSelectionAnchor = { pageIndex: activeIndex, idx: a };
-        commitSelectionRange(ordered, a, b);
+        textSelectionAnchor = { pageIndex: pIdx, idx: a };
+        commitSelectionRange(ordered, a, b, true, pIdx);
       }
       drawing = false; selectMode = false;
       return;
     }
     drawing = true; startPt = pt; selectMode = true;
-    selectOrderedWords = sortWordsReadingOrder(words);
-    if(e.shiftKey && textSelectionAnchor.pageIndex === activeIndex && textSelectionAnchor.idx >= 0){
+    selectOrderedWords = await wordsForPage(pIdx);
+    if(e.shiftKey && textSelectionAnchor.pageIndex >= 0 && textSelectionAnchor.idx >= 0){
       // shift-click/drag extends the existing selection from its original
       // anchor to this new point, the standard "select from X to Y" shortcut
       selectStartIdx = textSelectionAnchor.idx;
@@ -913,17 +998,18 @@ async function onPointerDown(e){
       // previous multi-page drag so old pages don't stay highlighted
       carriedSelections = [];
       selectStartIdx = nearestWordIndex(selectOrderedWords, pt);
-      textSelectionAnchor = { pageIndex: activeIndex, idx: selectStartIdx };
+      textSelectionAnchor = { pageIndex: pIdx, idx: selectStartIdx };
       selectIsShiftExtend = false;
     }
     selectPreviewLines = null;
     lastClientX = (e.touches ? e.touches[0].clientX : e.clientX);
     lastClientY = (e.touches ? e.touches[0].clientY : e.clientY);
+    await extendSelectionToClientPt(lastClientX, lastClientY);
     return;
   }
   if(currentTool === 'text'){
     const idx = findTextAt(pt);
-    if(idx >= 0) openTextEditor(pages[activeIndex].annotations[idx].points[0], idx);
+    if(idx >= 0) openTextEditor(pages[pIdx].annotations[idx].points[0], idx);
     else openTextEditor(pt, null);
     return;
   }
@@ -932,7 +1018,7 @@ async function onPointerDown(e){
     return;
   }
   if(currentTool === 'highlighter'){
-    const p = pages[activeIndex];
+    const p = pages[pIdx];
     const words = await ensurePageTextWords(p);
     if(words.length){
       // snap-to-word mode: drag a box (or click one word) instead of freehand ink
@@ -958,7 +1044,7 @@ function onPointerMove(e){
     const cx = (e.touches ? e.touches[0].clientX : e.clientX);
     const cy = (e.touches ? e.touches[0].clientY : e.clientY);
     lastClientX = cx; lastClientY = cy;
-    updateSelectionPreviewFromClientPt(cx, cy);
+    extendSelectionToClientPt(cx, cy);
     updateAutoScroll(cy);
     return;
   }
@@ -967,7 +1053,8 @@ function onPointerMove(e){
       x: Math.min(startPt.x, pt.x), y: Math.min(startPt.y, pt.y),
       w: Math.abs(pt.x-startPt.x), h: Math.abs(pt.y-startPt.y)
     };
-    const overlay = el('overlayCanvas'), dpr = window.devicePixelRatio||1;
+    const overlay = overlayFor(interactionPageIdx), dpr = window.devicePixelRatio||1;
+    if(!overlay) return;
     const W = overlay.width/dpr, H = overlay.height/dpr;
     redrawOverlay();
     const octx = overlay.getContext('2d');
@@ -977,25 +1064,29 @@ function onPointerMove(e){
     octx.restore();
     return;
   }
+  const liveOverlay = overlayFor(interactionPageIdx);
+  if(!liveOverlay) return;
+  const liveDpr = window.devicePixelRatio||1;
   if(currentPath){
     currentPath.points.push(pt);
-    redrawOverlay(); drawAnnotationsOnCtx(el('overlayCanvas').getContext('2d'), [currentPath],
-      el('overlayCanvas').width/(window.devicePixelRatio||1), el('overlayCanvas').height/(window.devicePixelRatio||1));
+    redrawOverlayFor(interactionPageIdx);
+    drawAnnotationsOnCtx(liveOverlay.getContext('2d'), [currentPath], liveOverlay.width/liveDpr, liveOverlay.height/liveDpr);
   } else if(liveShape){
     liveShape.points[1] = pt;
-    redrawOverlay(); drawAnnotationsOnCtx(el('overlayCanvas').getContext('2d'), [liveShape],
-      el('overlayCanvas').width/(window.devicePixelRatio||1), el('overlayCanvas').height/(window.devicePixelRatio||1));
+    redrawOverlayFor(interactionPageIdx);
+    drawAnnotationsOnCtx(liveOverlay.getContext('2d'), [liveShape], liveOverlay.width/liveDpr, liveOverlay.height/liveDpr);
   }
 }
 async function onPointerUp(e){
   if(!drawing) return;
   drawing = false;
-  const p = pages[activeIndex];
+  const p = pages[interactionPageIdx];
   if(selectMode){
     selectMode = false;
     stopAutoScroll();
-    const pt = fracFromEvent(e);
-    const endIdx = nearestWordIndex(selectOrderedWords, pt);
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX);
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY);
+    const pt = fracFromEvent(e, interactionPageIdx);
     const moved = Math.hypot(pt.x-startPt.x, pt.y-startPt.y);
     if(moved < 0.004 && !selectIsShiftExtend){
       // a plain click with no drag: clear rather than select one word, matching
@@ -1004,17 +1095,13 @@ async function onPointerUp(e){
       clearTextSelection();
       return;
     }
-    if(selectStartIdx >= 0 && endIdx >= 0){
-      const a = Math.min(selectStartIdx, endIdx), b = Math.max(selectStartIdx, endIdx);
-      const run = selectOrderedWords.slice(a, b+1);
-      textSelection = { pageIndex: activeIndex, words: run, lineRects: mergeSelectionIntoLines(run), text: run.map(w=>w.text).join(' ') };
-      const pageCount = carriedSelections.length + 1;
-      toast('Selected ' + fullSelectionWordCount() + ' word(s)' + (pageCount > 1 ? ' across ' + pageCount + ' pages' : '') + ' — press Ctrl/Cmd+C to copy');
-    } else {
-      clearTextSelection(false);
+    if(cx != null) await extendSelectionToClientPt(cx, cy);
+    const n = fullSelectionWordCount();
+    if(n){
+      const pageCount = carriedSelections.length + (textSelection.words.length ? 1 : 0);
+      toast('Selected ' + n + ' word(s)' + (pageCount > 1 ? ' across ' + pageCount + ' pages' : '') + ' — press Ctrl/Cmd+C to copy');
     }
     selectPreviewLines = null; selectOrderedWords = []; selectStartIdx = -1; selectIsShiftExtend = false;
-    redrawOverlay();
     return;
   }
   if(wordSelectMode){
@@ -1042,7 +1129,7 @@ async function onPointerUp(e){
   redrawOverlay(); renderThumbnails();
 }
 function findTextAt(pt){
-  const p = pages[activeIndex];
+  const p = pages[interactionPageIdx];
   for(let i=p.annotations.length-1;i>=0;i--){
     const a = p.annotations[i];
     if(a.type !== 'text') continue;
@@ -1065,8 +1152,10 @@ function cleanupTextEditor(commit){
 
 function openTextEditor(pt, existingIdx){
   cleanupTextEditor(true);
-  const p = pages[activeIndex];
-  const overlay = el('overlayCanvas');
+  const pageIdx = interactionPageIdx;
+  const p = pages[pageIdx];
+  const overlay = overlayFor(pageIdx);
+  if(!overlay) return;
   const rect = overlay.getBoundingClientRect();
   let fontFrac, initialText = '', color;
   if(existingIdx != null){
@@ -1085,7 +1174,7 @@ function openTextEditor(pt, existingIdx){
   editor.style.fontSize = (fontFrac*rect.width) + 'px';
   editor.style.color = color;
   editor.textContent = initialText;
-  el('pageViewport').appendChild(editor);
+  viewportFor(pageIdx).appendChild(editor);
   activeEditor = editor;
   editor.focus();
   if(initialText){
@@ -1120,7 +1209,7 @@ function openTextEditor(pt, existingIdx){
 }
 
 function eraseAt(pt){
-  const p = pages[activeIndex];
+  const p = pages[interactionPageIdx];
   for(let i=p.annotations.length-1;i>=0;i--){
     const a = p.annotations[i];
     let hit = false;
@@ -1140,7 +1229,7 @@ function eraseAt(pt){
     if(hit){ snapshot(); p.annotations.splice(i,1); redrawOverlay(); renderThumbnails(); return; }
   }
 }
-['mousedown','touchstart'].forEach(ev => el('overlayCanvas').addEventListener(ev, onPointerDown, {passive:false}));
+// mousedown is bound per page overlay in buildPageViews().
 // mousemove/mouseup are bound on window (not just the canvas) so an in-progress
 // drag — a pen stroke, a text selection reaching toward the page edge for
 // auto-scroll, etc. — isn't cut short the moment the pointer crosses the
@@ -1152,13 +1241,14 @@ function eraseAt(pt){
 
 function setTool(t){
   cleanupTextEditor(false);
-  if(t !== 'select'){ clearTextSelection(); textSelectionAnchor = { pageIndex: null, idx: -1 }; }
+  if(t !== 'select'){ clearTextSelection(); textSelectionAnchor = { pageIndex: -1, idx: -1 }; }
   currentTool = t;
   ['select','pen','highlighter','rect','ellipse','text','eraser'].forEach(name => {
     const btn = el('tool'+name.charAt(0).toUpperCase()+name.slice(1));
     if(btn) btn.classList.toggle('active', name===t);
   });
-  el('overlayCanvas').className = 'tool-'+t;
+  const container = el('pagesContainer');
+  [...container.querySelectorAll('.overlay-canvas')].forEach(c => c.className = 'overlay-canvas tool-'+t);
 }
 [['toolSelect','select'],['toolPen','pen'],['toolHighlighter','highlighter'],['toolRect','rect'],
  ['toolEllipse','ellipse'],['toolText','text'],['toolEraser','eraser']].forEach(([id,t])=>{
@@ -1177,14 +1267,14 @@ const dropzone = el('dropzone');
 ['dragleave','drop'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); el('dzCard').classList.remove('drag'); }));
 dropzone.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if(f) openMain(f); });
 
-el('prevBtn').onclick = () => { if(activeIndex>0){ activeIndex--; renderActivePage(); highlightActiveThumb(); } };
-el('nextBtn').onclick = () => { if(activeIndex<pages.length-1){ activeIndex++; renderActivePage(); highlightActiveThumb(); } };
+el('prevBtn').onclick = () => { if(activeIndex>0){ activeIndex--; scrollToPage(activeIndex, true); highlightActiveThumb(); } };
+el('nextBtn').onclick = () => { if(activeIndex<pages.length-1){ activeIndex++; scrollToPage(activeIndex, true); highlightActiveThumb(); } };
 el('pageInput').addEventListener('keydown', e => { if(e.key==='Enter'){ jumpTo(e.target.value); }});
 el('pageInput').addEventListener('blur', e => jumpTo(e.target.value));
-function jumpTo(v){ let n = parseInt(v)-1; if(isNaN(n)) return; n = Math.min(pages.length-1, Math.max(0,n)); activeIndex=n; renderActivePage(); highlightActiveThumb(); }
+function jumpTo(v){ let n = parseInt(v)-1; if(isNaN(n)) return; n = Math.min(pages.length-1, Math.max(0,n)); activeIndex=n; scrollToPage(n, true); highlightActiveThumb(); }
 
-el('zoomInBtn').onclick = () => { zoom = Math.min(3, zoom+0.25); renderActivePage(); };
-el('zoomOutBtn').onclick = () => { zoom = Math.max(0.5, zoom-0.25); renderActivePage(); };
+el('zoomInBtn').onclick = async () => { zoom = Math.min(3, zoom+0.25); const keep = activeIndex; await buildPageViews(); scrollToPage(keep); };
+el('zoomOutBtn').onclick = async () => { zoom = Math.max(0.5, zoom-0.25); const keep = activeIndex; await buildPageViews(); scrollToPage(keep); };
 el('undoBtn').onclick = undo;
 el('redoBtn').onclick = redo;
 
@@ -1315,7 +1405,9 @@ async function gotoSearchMatch(){
   activeIndex = pageIdx;
   const words = await ensurePageTextWords(pages[pageIdx]);
   pages[pageIdx].searchHighlights = words.filter(w => w.text.toLowerCase().includes(query)).map(w => w.rectFrac);
-  await renderActivePage();
+  scrollToPage(pageIdx, true);
+  await renderVisiblePages();
+  redrawOverlayFor(pageIdx);
   el('searchCount').textContent = (searchCursor+1) + '/' + searchMatches.length;
 }
 function searchNext(){ if(!searchMatches.length) return; searchCursor = (searchCursor+1) % searchMatches.length; gotoSearchMatch(); }
@@ -1411,13 +1503,15 @@ async function detectForm(docIdx){
   }
 }
 
-async function renderFormFieldOverlay(){
-  const layer = el('formFieldsLayer');
+async function renderFormFieldOverlay(idx){
+  if(idx == null) idx = activeIndex;
+  const layer = formLayerFor(idx);
+  if(!layer) return;
   layer.innerHTML = '';
   if(!pages.length) return;
-  const p = pages[activeIndex];
-  layer.style.width = el('overlayCanvas').style.width;
-  layer.style.height = el('overlayCanvas').style.height;
+  const p = pages[idx];
+  const ov = overlayFor(idx);
+  if(ov){ layer.style.width = ov.style.width; layer.style.height = ov.style.height; }
   if(!formFieldsVisible || p.kind !== 'source' || p.srcDocIdx !== formDocIdx) return;
   const entries = formFieldsByPage[p.srcPageNum-1];
   if(!entries || !entries.length) return;
@@ -1483,7 +1577,7 @@ async function applyFormValuesAndFlatten(){
 el('formToggleBtn').onclick = () => {
   formFieldsVisible = !formFieldsVisible;
   el('formToggleBtn').classList.toggle('active', formFieldsVisible);
-  renderFormFieldOverlay();
+  for(let i=0;i<pages.length;i++) renderFormFieldOverlay(i);
 };
 
 /* ---------- Save (export) ---------- */
