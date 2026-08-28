@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Quickview-v3.7 — PDF Editor</title>
+<title>Quickview-v3.8 — PDF Editor</title>
 <link rel="icon" id="favicon" type="image/svg+xml" href="">
 <script>
   // Defaults to an inline SVG icon (red document + blue "PDF" magnifying
@@ -142,7 +142,7 @@
 <div id="app">
 
   <div id="toolbar">
-    <div class="brand"><span class="dot"></span>Quickview-v3.7<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
+    <div class="brand"><span class="dot"></span>Quickview-v3.8<span class="byline"> · Coded by <a class="claude-badge" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Built with Claude">
       <svg width="13" height="13" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg"><g fill="#D97757">
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z"/>
         <path d="M0,-10 C1.4,-7 1.4,-3 0,0 C-1.4,-3 -1.4,-7 0,-10 Z" transform="rotate(30)"/>
@@ -760,12 +760,19 @@ async function advanceSelectionPage(dir){
 }
 
 // How long the pointer must keep pulling past an exhausted page edge before
-// the page actually turns. Without this a fast drag blows through several
-// pages the moment scrolling bottoms out; the dwell makes the page turn a
-// deliberate act rather than an accident. Reset whenever the drag backs off
-// the edge or a page actually turns.
+// the page actually turns. The FIRST turn of a drag takes the full dwell, so
+// a quick drag to the bottom doesn't flip pages by accident; once you've
+// committed to one turn the intent is clear, so each subsequent turn in the
+// same continuous drag gets faster (down to a floor). Backing off the edge or
+// ending the drag resets the streak.
 const PAGE_TURN_DWELL_MS = 650;
-let edgeHoldSince = null, edgeHoldDir = 0;
+const PAGE_TURN_DWELL_MIN_MS = 130;
+const PAGE_TURN_DWELL_DECAY = 0.45;
+let edgeHoldSince = null, edgeHoldDir = 0, pageTurnStreak = 0;
+
+function currentPageTurnDwell(){
+  return Math.max(PAGE_TURN_DWELL_MIN_MS, PAGE_TURN_DWELL_MS * Math.pow(PAGE_TURN_DWELL_DECAY, pageTurnStreak));
+}
 
 function autoScrollStep(){
   if(!drawing || !selectMode || autoScrollDy === 0){ autoScrollHandle = null; edgeHoldSince = null; return; }
@@ -776,9 +783,10 @@ function autoScrollStep(){
   if(atBottom || atTop){
     const dir = atBottom ? 1 : -1;
     if(edgeHoldDir !== dir){ edgeHoldDir = dir; edgeHoldSince = performance.now(); }
-    if(performance.now() - edgeHoldSince >= PAGE_TURN_DWELL_MS){
+    if(performance.now() - edgeHoldSince >= currentPageTurnDwell()){
       autoScrollHandle = null;
       edgeHoldSince = null; edgeHoldDir = 0;
+      pageTurnStreak++;
       advanceSelectionPage(dir);
       return;
     }
@@ -802,13 +810,45 @@ function updateAutoScroll(clientY){
   else autoScrollDy = 0;
   // backing off the edge (or reversing) restarts the page-turn dwell
   if(autoScrollDy === 0 || Math.sign(autoScrollDy) !== Math.sign(prev)){ edgeHoldSince = null; edgeHoldDir = 0; }
+  // reversing direction abandons the run of turns, so start over at full dwell
+  if(prev !== 0 && autoScrollDy !== 0 && Math.sign(autoScrollDy) !== Math.sign(prev)) pageTurnStreak = 0;
   if(autoScrollDy !== 0 && autoScrollHandle == null) autoScrollHandle = requestAnimationFrame(autoScrollStep);
 }
 function stopAutoScroll(){
   autoScrollDy = 0;
-  edgeHoldSince = null; edgeHoldDir = 0;
+  edgeHoldSince = null; edgeHoldDir = 0; pageTurnStreak = 0;
   if(autoScrollHandle != null){ cancelAnimationFrame(autoScrollHandle); autoScrollHandle = null; }
 }
+
+/* ---------- Wheel scrolling across page boundaries ---------- */
+// Scrolling past the bottom (or top) of a page moves to the next (previous)
+// one, so the wheel walks the whole document instead of dead-ending at each
+// page. Needs a small dwell too, so one flick doesn't skip several pages.
+let wheelEdgeSince = null, wheelEdgeDir = 0, wheelTurnAt = 0;
+const WHEEL_PAGE_DWELL_MS = 220, WHEEL_PAGE_COOLDOWN_MS = 320;
+
+el('main').addEventListener('wheel', e => {
+  if(!pages.length) return;
+  const main = el('main');
+  const maxScroll = main.scrollHeight - main.clientHeight;
+  const dir = e.deltaY > 0 ? 1 : (e.deltaY < 0 ? -1 : 0);
+  if(!dir) return;
+  const atEdge = dir > 0 ? main.scrollTop >= maxScroll - 1 : main.scrollTop <= 1;
+  if(!atEdge){ wheelEdgeSince = null; wheelEdgeDir = 0; return; }
+  const nextIdx = activeIndex + dir;
+  if(nextIdx < 0 || nextIdx >= pages.length){ wheelEdgeSince = null; wheelEdgeDir = 0; return; }
+  const now = performance.now();
+  if(wheelEdgeDir !== dir){ wheelEdgeDir = dir; wheelEdgeSince = now; return; }
+  if(now - wheelTurnAt < WHEEL_PAGE_COOLDOWN_MS) return;
+  if(now - wheelEdgeSince < WHEEL_PAGE_DWELL_MS) return;
+  wheelTurnAt = now; wheelEdgeSince = null; wheelEdgeDir = 0;
+  activeIndex = nextIdx;
+  renderActivePage().then(() => {
+    // land at the top when moving forward, the bottom when moving back, so
+    // the content flows continuously in the direction you're scrolling
+    main.scrollTop = dir > 0 ? 0 : (main.scrollHeight - main.clientHeight);
+  });
+}, { passive: true });
 
 // Words on the same visual line as the given word index, as an [a,b] range
 // into the reading-order array (used by triple-click line selection).
