@@ -86,6 +86,7 @@
   .overlay-canvas.tool-pen,.overlay-canvas.tool-highlighter{cursor:crosshair;}
   .overlay-canvas.tool-rect,.overlay-canvas.tool-ellipse{cursor:crosshair;}
   .overlay-canvas.tool-text{cursor:text;}
+  .overlay-canvas.tool-edittext{cursor:text;}
   .overlay-canvas.tool-eraser{cursor:cell;}
   .overlay-canvas.tool-select{cursor:text;}
   .page-label{position:absolute;left:0;top:-17px;font-size:10.5px;color:var(--muted);}
@@ -201,6 +202,7 @@
     <button class="tb-btn" id="toolRect" data-tool="rect" style="display:none;">▭ Rect</button>
     <button class="tb-btn" id="toolEllipse" data-tool="ellipse" style="display:none;">◯ Oval</button>
     <button class="tb-btn" id="toolText" data-tool="text" style="display:none;">T Text</button>
+    <button class="tb-btn" id="toolEditText" data-tool="edittext" style="display:none;" title="Click existing text to replace it (covers the original and retypes over it — an approximation, not true reflow)">Aa Edit Text</button>
     <button class="tb-btn" id="toolEraser" data-tool="eraser" style="display:none;">⌫ Erase</button>
     <input type="color" id="colorPicker" value="#e0344c" style="display:none;" title="Colour">
     <input type="range" id="widthSlider" min="1" max="18" value="3" style="display:none;" title="Stroke width">
@@ -332,7 +334,7 @@ function clampActiveIndex(){
 
 /* ---------- Loading ---------- */
 function showEditorChrome(show){
-  ['insertBtn','toolSelect','toolPen','toolHighlighter','toolRect','toolEllipse','toolText','toolEraser',
+  ['insertBtn','toolSelect','toolPen','toolHighlighter','toolRect','toolEllipse','toolText','toolEditText','toolEraser',
    'colorPicker','widthSlider','annSep','undoBtn','redoBtn','prevBtn','pageInfo','nextBtn','zoomSep',
    'zoomOutBtn','zoomLevel','zoomInBtn','endSep','printBtn','saveBtn','signBtn',
    'ocrBtn','ocrAllBtn','ocrSep'].forEach(id => el(id).style.display = show ? '' : 'none');
@@ -447,6 +449,14 @@ function drawAnnotationsOnCtx(ctx, annotations, W, H){
       lines.forEach((line, li) => ctx.fillText(line, pt.x*W, pt.y*H + li*size*1.25));
     } else if(a.type === 'wordhighlight'){
       ctx.fillRect(a.rect.x*W, a.rect.y*H, a.rect.w*W, a.rect.h*H);
+    } else if(a.type === 'textedit'){
+      const rx=a.rect.x*W, ry=a.rect.y*H, rw=a.rect.w*W, rh=a.rect.h*H;
+      ctx.fillStyle = a.bgColor || '#ffffff';
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.fillStyle = a.color || '#111111';
+      ctx.font = `${rh*0.82}px -apple-system, Arial, sans-serif`;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(a.text, rx, ry + rh*0.82);
     }
     ctx.restore();
   });
@@ -1057,6 +1067,28 @@ async function onPointerDown(e){
     else openTextEditor(pt, null);
     return;
   }
+  if(currentTool === 'edittext'){
+    const existingIdx = findTextEditAt(pt);
+    if(existingIdx >= 0){
+      const a = pages[pIdx].annotations[existingIdx];
+      openTextEditEditor(a.rect, existingIdx, a.text);
+      return;
+    }
+    const ordered = await wordsForPage(pIdx);
+    if(!ordered.length){ toast('No detected text here — use the Text tool to add new text instead.'); return; }
+    const idx = nearestWordIndex(ordered, pt);
+    if(idx < 0) return;
+    const [a,b] = lineRangeAround(ordered, idx);
+    const run = ordered.slice(a, b+1);
+    const rect = mergeSelectionIntoLines(run)[0];
+    const pad = rect.h*0.6;
+    if(pt.x < rect.x-pad || pt.x > rect.x+rect.w+pad || pt.y < rect.y-pad || pt.y > rect.y+rect.h+pad){
+      toast('Click on existing text to edit it.'); return;
+    }
+    const text = run.map(w=>w.text).join(' ');
+    openTextEditEditor(rect, null, text);
+    return;
+  }
   if(currentTool === 'eraser'){
     eraseAt(pt);
     return;
@@ -1187,6 +1219,99 @@ function findTextAt(pt){
   return -1;
 }
 
+function findTextEditAt(pt){
+  const p = pages[interactionPageIdx];
+  for(let i=p.annotations.length-1;i>=0;i--){
+    const a = p.annotations[i];
+    if(a.type === 'textedit' && rectContainsPt(a.rect, pt)) return i;
+  }
+  return -1;
+}
+
+// Best-effort guess at the original line's background/ink color, sampled from
+// the still-unedited base canvas (before any cover box is drawn over it) —
+// this is what lets a retyped line blend in instead of sitting on a stark
+// white patch over a tinted or dark page.
+function sampleTextEditColors(pageIdx, rect){
+  const fallback = { bg: '#ffffff', fg: '#111111' };
+  const base = baseFor(pageIdx);
+  if(!base) return fallback;
+  const w = base.width, h = base.height;
+  const sx = Math.max(0, Math.floor(rect.x*w)), sy = Math.max(0, Math.floor(rect.y*h));
+  const sw = Math.max(1, Math.min(w-sx, Math.ceil(rect.w*w)));
+  const sh = Math.max(1, Math.min(h-sy, Math.ceil(rect.h*h)));
+  let data;
+  try{ data = base.getContext('2d').getImageData(sx, sy, sw, sh).data; } catch(e){ return fallback; }
+  let lightest = -1, darkest = 256, lc = [255,255,255], dc = [0,0,0];
+  for(let i=0;i<data.length;i+=4*5){
+    const r=data[i], g=data[i+1], b=data[i+2];
+    const l = 0.299*r + 0.587*g + 0.114*b;
+    if(l > lightest){ lightest = l; lc = [r,g,b]; }
+    if(l < darkest){ darkest = l; dc = [r,g,b]; }
+  }
+  const hex = c => '#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  return { bg: hex(lc), fg: hex(dc) };
+}
+
+// Replace-existing-text editor: an <input> sized/positioned to the detected
+// line's rect. Unlike openTextEditor (which places new free-floating text),
+// this always writes a 'textedit' annotation that first paints over the
+// original line with its sampled background color, then draws the new text
+// on top — the same cover-and-retype trick every non-native PDF editor uses,
+// since PDFs don't have editable paragraphs to reflow.
+function openTextEditEditor(rect, existingIdx, initialText){
+  cleanupTextEditor(true);
+  const pageIdx = interactionPageIdx;
+  const p = pages[pageIdx];
+  const overlay = overlayFor(pageIdx);
+  if(!overlay) return;
+  const rectPx = overlay.getBoundingClientRect();
+  const colors = existingIdx != null
+    ? { bg: p.annotations[existingIdx].bgColor, fg: p.annotations[existingIdx].color }
+    : sampleTextEditColors(pageIdx, rect);
+  const editor = document.createElement('input');
+  editor.type = 'text';
+  editor.className = 'text-editor-input';
+  editor.spellcheck = false;
+  editor.value = initialText || '';
+  editor.style.left = (rect.x*rectPx.width) + 'px';
+  editor.style.top = (rect.y*rectPx.height) + 'px';
+  editor.style.width = Math.max(30, rect.w*rectPx.width) + 'px';
+  editor.style.height = (rect.h*rectPx.height) + 'px';
+  editor.style.fontSize = (rect.h*rectPx.height*0.75) + 'px';
+  editor.style.color = colors.fg;
+  editor.style.background = colors.bg;
+  viewportFor(pageIdx).appendChild(editor);
+  activeEditor = editor;
+  editor.focus();
+  editor.select();
+  let done = false;
+  editor._commit = () => {
+    if(done) return; done = true;
+    const text = editor.value;
+    editor.remove(); if(activeEditor===editor) activeEditor = null;
+    if(existingIdx != null){
+      snapshot();
+      if(text.trim()) p.annotations[existingIdx].text = text;
+      else p.annotations.splice(existingIdx,1);
+    } else if(text.trim()){
+      snapshot();
+      p.annotations.push({ type:'textedit', rect, text, bgColor: colors.bg, color: colors.fg });
+    }
+    redrawOverlay(); renderThumbnails();
+  };
+  editor._cancel = () => {
+    if(done) return; done = true;
+    editor.remove(); if(activeEditor===editor) activeEditor = null;
+  };
+  editor.addEventListener('blur', () => editor._commit());
+  editor.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if(e.key === 'Escape'){ e.preventDefault(); editor._cancel(); }
+    if(e.key === 'Enter'){ e.preventDefault(); editor.blur(); }
+  });
+}
+
 let activeEditor = null;
 function cleanupTextEditor(commit){
   if(!activeEditor) return;
@@ -1267,7 +1392,7 @@ function eraseAt(pt){
     } else if(a.type === 'text'){
       const q = a.points[0];
       hit = Math.abs(q.x-pt.x) < 0.15 && Math.abs(q.y-pt.y) < 0.05;
-    } else if(a.type === 'wordhighlight'){
+    } else if(a.type === 'wordhighlight' || a.type === 'textedit'){
       hit = rectContainsPt(a.rect, pt);
     }
     if(hit){ snapshot(); p.annotations.splice(i,1); redrawOverlay(); renderThumbnails(); return; }
@@ -1287,15 +1412,17 @@ function setTool(t){
   cleanupTextEditor(false);
   if(t !== 'select'){ clearTextSelection(); textSelectionAnchor = { pageIndex: -1, idx: -1 }; }
   currentTool = t;
-  ['select','pen','highlighter','rect','ellipse','text','eraser'].forEach(name => {
-    const btn = el('tool'+name.charAt(0).toUpperCase()+name.slice(1));
+  const toolBtnIds = { select:'toolSelect', pen:'toolPen', highlighter:'toolHighlighter', rect:'toolRect',
+    ellipse:'toolEllipse', text:'toolText', edittext:'toolEditText', eraser:'toolEraser' };
+  Object.keys(toolBtnIds).forEach(name => {
+    const btn = el(toolBtnIds[name]);
     if(btn) btn.classList.toggle('active', name===t);
   });
   const container = el('pagesContainer');
   [...container.querySelectorAll('.overlay-canvas')].forEach(c => c.className = 'overlay-canvas tool-'+t);
 }
 [['toolSelect','select'],['toolPen','pen'],['toolHighlighter','highlighter'],['toolRect','rect'],
- ['toolEllipse','ellipse'],['toolText','text'],['toolEraser','eraser']].forEach(([id,t])=>{
+ ['toolEllipse','ellipse'],['toolText','text'],['toolEditText','edittext'],['toolEraser','eraser']].forEach(([id,t])=>{
   el(id).onclick = () => setTool(t);
 });
 

@@ -13,6 +13,7 @@ Owned by [Coder5330](https://github.com/Coder5330). Coded by Claude.
 - Search text across the document, with word-level highlighting for both digital text and OCR results
 - Word-processor-style text selection with copy-to-clipboard, shift-click range extend, and auto-scroll/auto-page-advance while dragging
 - Detect and fill AcroForm fields (text, checkbox, dropdown, radio), flattened into the exported PDF
+- Edit existing text in place — click a line to retype it; covers the original with its sampled background color and draws the new text on top (an approximation, not true reflow, since PDFs don't store editable paragraphs — the page is rasterized on export, same as any other annotation)
 - Digitally sign a PDF with a real, client-side-generated X.509 certificate — a PAdES/CMS (`/Sig`, detached PKCS#7) signature that verifies in Adobe Reader and other standard validators, meeting eIDAS Advanced Electronic Signature and ESIGN Act bars (self-signed, or an imported CA-issued `.p12`; not eIDAS Qualified, which requires a licensed EU Trust Service Provider)
 - Export the edited PDF, or print it
 
