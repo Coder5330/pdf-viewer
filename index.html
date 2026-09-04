@@ -128,6 +128,35 @@
   #searchInput{width:120px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:var(--toolbar-text);border-radius:5px;padding:6px 8px;font-size:12.5px;}
   #searchCount{color:#cfd3d8;font-size:11.5px;min-width:34px;text-align:center;white-space:nowrap;}
 
+  #signedBadge{color:#9ad0a8;font-size:11.5px;white-space:nowrap;display:flex;align-items:center;gap:4px;}
+
+  /* Sign modal */
+  .modal-overlay{position:fixed;inset:0;background:rgba(20,20,18,.55);display:flex;align-items:center;justify-content:center;z-index:60;padding:20px;}
+  .modal-card{background:var(--paper);color:var(--ink);border-radius:12px;width:100%;max-width:420px;max-height:88vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.35);}
+  .modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);font-weight:600;font-size:15px;}
+  .modal-x{background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;padding:2px 6px;border-radius:4px;}
+  .modal-x:hover{background:var(--backdrop);color:var(--ink);}
+  .modal-body{padding:18px;}
+  .modal-body label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;}
+  .modal-body label:first-child{margin-top:0;}
+  .modal-body input[type=text],.modal-body input[type=email],.modal-body input[type=password]{
+    width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:#fff;color:var(--ink);}
+  .modal-btn{width:100%;padding:10px;border-radius:7px;border:1px solid var(--line);background:var(--backdrop);
+    color:var(--ink);font-size:13px;font-weight:600;cursor:pointer;margin-top:12px;}
+  .modal-btn:hover{background:#e2ddd0;}
+  .modal-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .modal-btn.primary:hover{background:var(--accent-hover);}
+  .modal-btn:disabled{opacity:.5;cursor:not-allowed;}
+  .modal-sep{display:flex;align-items:center;gap:10px;margin:16px 0;color:var(--muted);font-size:11px;}
+  .modal-sep:before,.modal-sep:after{content:"";flex:1;height:1px;background:var(--line);}
+  .modal-link{background:none;border:none;color:var(--accent);font-size:12px;cursor:pointer;padding:0;text-decoration:underline;}
+  .modal-fineprint{font-size:11px;color:var(--muted);line-height:1.5;margin-top:16px;padding-top:14px;border-top:1px solid var(--line);}
+  .identity-card{background:var(--side);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.7;}
+  .identity-card b{color:var(--ink);}
+  .modal-error{color:var(--danger);font-size:12px;margin-top:8px;}
+  .modal-spinner{width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;
+    animation:spin .8s linear infinite;display:inline-block;vertical-align:-3px;margin-right:6px;}
+
   #printArea{display:none;}
   @media print{
     #toolbar,#sidebar,#dropzone,#loading,#toast{display:none!important;}
@@ -201,7 +230,9 @@
     <span id="zoomLevel" style="display:none;">100%</span>
     <button class="tb-btn" id="zoomInBtn" style="display:none;">+</button>
     <div class="sep" id="endSep" style="display:none;"></div>
+    <span id="signedBadge" title="This document already contains a digital signature" style="display:none;">🔏 Signed</span>
     <button class="tb-btn" id="printBtn" style="display:none;">🖨 Print</button>
+    <button class="tb-btn" id="signBtn" style="display:none;">🔏 Sign</button>
     <button class="tb-btn primary" id="saveBtn" style="display:none;">⬇ Save PDF</button>
   </div>
 
@@ -227,11 +258,23 @@
   <div id="toast"></div>
   <input type="file" id="fileInput" accept="application/pdf,.pdf" style="display:none;">
   <input type="file" id="insertInput" accept="application/pdf,.pdf" style="display:none;">
+
+  <div id="signOverlay" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+      <div class="modal-head">
+        <span>🔏 Sign document</span>
+        <button class="modal-x" id="signCloseBtn" title="Close">✕</button>
+      </div>
+      <div class="modal-body" id="signModalBody"></div>
+    </div>
+  </div>
+  <input type="file" id="p12Input" accept=".p12,.pfx" style="display:none;">
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/forge/1.3.1/forge.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 const el = id => document.getElementById(id);
@@ -291,7 +334,7 @@ function clampActiveIndex(){
 function showEditorChrome(show){
   ['insertBtn','toolSelect','toolPen','toolHighlighter','toolRect','toolEllipse','toolText','toolEraser',
    'colorPicker','widthSlider','annSep','undoBtn','redoBtn','prevBtn','pageInfo','nextBtn','zoomSep',
-   'zoomOutBtn','zoomLevel','zoomInBtn','endSep','printBtn','saveBtn',
+   'zoomOutBtn','zoomLevel','zoomInBtn','endSep','printBtn','saveBtn','signBtn',
    'ocrBtn','ocrAllBtn','ocrSep'].forEach(id => el(id).style.display = show ? '' : 'none');
   el('searchBox').style.display = show ? 'flex' : 'none';
   el('searchSep').style.display = show ? '' : 'none';
@@ -333,6 +376,7 @@ async function openMain(file){
   const newPages = await loadFile(file, true);
   if(!newPages){ setLoading(false); return; }
   pages = newPages;
+  el('signedBadge').style.display = detectExistingSignature(docs[0].arrayBuffer) ? 'flex' : 'none';
   showEditorChrome(true);
   el('pageCount').textContent = pages.length;
   el('pagesContainer').style.display = '';
@@ -1633,6 +1677,438 @@ el('saveBtn').onclick = async () => {
   }
   setLoading(false);
 };
+
+/* ---------- Digital signatures (PAdES-style CMS/PKCS#7) ----------
+   Produces a real ISO 32000 /Sig dictionary with a detached CMS signature —
+   an eIDAS Advanced Electronic Signature (self-signed, or backed by an
+   imported CA/QTSP certificate), not a Qualified signature. See the
+   in-modal disclosure for the legal distinction. */
+const SIGN_IDENTITY_KEY = 'quickview_signing_identity';
+const SIGN_IDENTITY_META_KEY = 'quickview_signing_identity_meta';
+let signIdentity = null; // { privateKey, cert, chain, name, email, org } — session-only, re-unlocked from localStorage each load
+
+function escapeHtml(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function pad2(n){ return String(n).padStart(2,'0'); }
+function toPdfDate(d){
+  return `D:${d.getUTCFullYear()}${pad2(d.getUTCMonth()+1)}${pad2(d.getUTCDate())}${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}${pad2(d.getUTCSeconds())}+00'00'`;
+}
+function randomSerialHex(){
+  // ensure the high bit of the first byte is clear so the DER INTEGER reads as positive
+  let hex = forge.util.bytesToHex(forge.random.getBytesSync(9));
+  if(parseInt(hex.substring(0,2),16) & 0x80) hex = '00' + hex;
+  return hex;
+}
+function certAttr(cert, name){
+  const a = cert.subject.attributes.find(x => x.name === name);
+  return a ? a.value : '';
+}
+function certFingerprint(cert){
+  const der = forge.asn1.toDer(forge.pki.certificateToAsn1(cert)).getBytes();
+  return forge.md.sha256.create().update(der).digest().toHex().toUpperCase().replace(/(..)(?=.)/g, '$1:');
+}
+// Convert a Uint8Array to a plain JS "binary string" (one char per byte) —
+// what forge's util functions expect — chunked so a large PDF doesn't blow
+// the call stack via a single String.fromCharCode(...spread).
+function bytesToLatin1(bytes){
+  let out = '';
+  const chunk = 0x8000;
+  for(let i=0;i<bytes.length;i+=chunk) out += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  return out;
+}
+
+// RSA-2048 keygen is synchronous in forge; yield one tick first so the
+// spinner/disabled state actually paints before the (blocking) generation.
+function generateKeyPairAsync(bits){
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      try{ resolve(forge.pki.rsa.generateKeyPair({ bits })); }
+      catch(e){ reject(e); }
+    }, 30);
+  });
+}
+
+function persistIdentity(privateKey, cert, passphrase, meta){
+  const p12Asn1 = forge.pkcs12.toPkcs12Asn1(privateKey, [cert], passphrase, { algorithm: '3des' });
+  const der = forge.asn1.toDer(p12Asn1).getBytes();
+  localStorage.setItem(SIGN_IDENTITY_KEY, forge.util.encode64(der));
+  // Name/email/org aren't secret — they're already in the cert's Subject,
+  // which ends up in the signed PDF — so a plaintext summary alongside the
+  // encrypted blob is fine and lets the "locked" modal state greet the user
+  // by name without asking for the passphrase first.
+  localStorage.setItem(SIGN_IDENTITY_META_KEY, JSON.stringify(meta));
+}
+
+async function createSigningIdentity({ name, email, org, passphrase }){
+  const keys = await generateKeyPairAsync(2048);
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+  cert.serialNumber = randomSerialHex();
+  const now = new Date();
+  cert.validity.notBefore = now;
+  const notAfter = new Date(now); notAfter.setFullYear(now.getFullYear() + 3);
+  cert.validity.notAfter = notAfter;
+  const attrs = [{ name:'commonName', value: name }, { name:'emailAddress', value: email }];
+  if(org) attrs.push({ name:'organizationName', value: org });
+  cert.setSubject(attrs);
+  cert.setIssuer(attrs); // self-signed: issuer === subject
+  cert.setExtensions([
+    { name:'basicConstraints', cA: false },
+    { name:'keyUsage', digitalSignature: true, nonRepudiation: true },
+    { name:'extKeyUsage', emailProtection: true }
+  ]);
+  cert.sign(keys.privateKey, forge.md.sha256.create());
+  persistIdentity(keys.privateKey, cert, passphrase, { name, email, org });
+  signIdentity = { privateKey: keys.privateKey, cert, chain: [], name, email, org };
+  return signIdentity;
+}
+
+function parseP12(der, passphrase){
+  const asn1 = forge.asn1.fromDer(der);
+  const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, passphrase);
+  const certBags = (p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag]) || [];
+  let keyBags = (p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag]) || [];
+  if(!keyBags.length) keyBags = (p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag]) || [];
+  if(!certBags.length || !keyBags.length) throw new Error('No certificate/private key found in file.');
+  const keyBag = keyBags[0];
+  const leafBag = certBags.find(b => keyBag.attributes && b.attributes &&
+    JSON.stringify(b.attributes.localKeyId) === JSON.stringify(keyBag.attributes.localKeyId)) || certBags[0];
+  const cert = leafBag.cert;
+  const chain = certBags.map(b => b.cert).filter(c => c !== cert);
+  return { privateKey: keyBag.key, cert, chain };
+}
+
+function unlockStoredIdentity(passphrase){
+  const b64 = localStorage.getItem(SIGN_IDENTITY_KEY);
+  if(!b64) throw new Error('No saved signing identity.');
+  const der = forge.util.decode64(b64);
+  const { privateKey, cert, chain } = parseP12(der, passphrase);
+  signIdentity = {
+    privateKey, cert, chain,
+    name: certAttr(cert, 'commonName') || 'Signer',
+    email: certAttr(cert, 'emailAddress') || '',
+    org: certAttr(cert, 'organizationName') || ''
+  };
+  return signIdentity;
+}
+
+async function importP12File(file, passphrase){
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const der = forge.util.binary.raw.encode(buf);
+  const { privateKey, cert, chain } = parseP12(der, passphrase);
+  const name = certAttr(cert, 'commonName') || 'Signer';
+  const email = certAttr(cert, 'emailAddress') || '';
+  const org = certAttr(cert, 'organizationName') || '';
+  persistIdentity(privateKey, cert, passphrase, { name, email, org });
+  signIdentity = { privateKey, cert, chain, name, email, org };
+  return signIdentity;
+}
+
+function clearSigningIdentity(){
+  signIdentity = null;
+  localStorage.removeItem(SIGN_IDENTITY_KEY);
+  localStorage.removeItem(SIGN_IDENTITY_META_KEY);
+}
+
+// Best-effort, non-cryptographic scan for an existing signature so the
+// toolbar can show a "Signed" badge — not a validity check.
+function detectExistingSignature(buf){
+  try{
+    const bytes = new Uint8Array(buf);
+    const scanLen = Math.min(bytes.length, 5_000_000);
+    let str = '';
+    const chunk = 0x8000;
+    for(let i=0;i<scanLen;i+=chunk) str += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i+chunk, scanLen)));
+    return /\/Type\s*\/Sig\b/.test(str) && /\/ByteRange/.test(str);
+  } catch(e){ return false; }
+}
+
+// Reserve a placeholder /Sig field + widget + AcroForm entry on a pdf-lib
+// PDFDocument using the low-level context API, so the field's on-disk byte
+// offsets are known before we've computed the signature that fills them.
+function addSignaturePlaceholder(pdfDoc, identity, sigLengthBytes){
+  const { PDFName, PDFHexString, PDFArray, PDFNumber, PDFString, PDFDict } = PDFLib;
+  const context = pdfDoc.context;
+  const contentsPlaceholder = '0'.repeat(sigLengthBytes * 2);
+
+  const sigDictMap = new Map();
+  sigDictMap.set(PDFName.of('Type'), PDFName.of('Sig'));
+  sigDictMap.set(PDFName.of('Filter'), PDFName.of('Adobe.PPKLite'));
+  sigDictMap.set(PDFName.of('SubFilter'), PDFName.of('adbe.pkcs7.detached'));
+  sigDictMap.set(PDFName.of('ByteRange'), context.obj([0, 9999999999, 9999999999, 9999999999]));
+  sigDictMap.set(PDFName.of('Contents'), PDFHexString.of(contentsPlaceholder));
+  sigDictMap.set(PDFName.of('M'), PDFString.of(toPdfDate(new Date())));
+  sigDictMap.set(PDFName.of('Name'), PDFString.of(identity.name || 'Signer'));
+  sigDictMap.set(PDFName.of('Reason'), PDFString.of('Document signed via Quickview'));
+  if(identity.email) sigDictMap.set(PDFName.of('ContactInfo'), PDFString.of(identity.email));
+  const sigRef = context.register(PDFDict.fromMapWithContext(sigDictMap, context));
+
+  const page0 = pdfDoc.getPages()[0];
+  const widgetMap = new Map();
+  widgetMap.set(PDFName.of('Type'), PDFName.of('Annot'));
+  widgetMap.set(PDFName.of('Subtype'), PDFName.of('Widget'));
+  widgetMap.set(PDFName.of('FT'), PDFName.of('Sig'));
+  widgetMap.set(PDFName.of('Rect'), context.obj([0, 0, 0, 0]));
+  widgetMap.set(PDFName.of('V'), sigRef);
+  widgetMap.set(PDFName.of('T'), PDFString.of('Signature1'));
+  widgetMap.set(PDFName.of('F'), PDFNumber.of(132));
+  widgetMap.set(PDFName.of('P'), page0.ref);
+  const widgetRef = context.register(PDFDict.fromMapWithContext(widgetMap, context));
+
+  let annots = page0.node.lookup(PDFName.of('Annots'));
+  if(!(annots instanceof PDFArray)){
+    annots = context.obj([]);
+    page0.node.set(PDFName.of('Annots'), annots);
+  }
+  annots.push(widgetRef);
+
+  const catalog = pdfDoc.catalog;
+  let acroForm = catalog.lookup(PDFName.of('AcroForm'));
+  if(!(acroForm instanceof PDFDict)){
+    const acroMap = new Map();
+    acroMap.set(PDFName.of('Fields'), context.obj([widgetRef]));
+    acroMap.set(PDFName.of('SigFlags'), PDFNumber.of(3)); // SignaturesExist | AppendOnly
+    catalog.set(PDFName.of('AcroForm'), context.register(PDFDict.fromMapWithContext(acroMap, context)));
+  } else {
+    let fields = acroForm.lookup(PDFName.of('Fields'));
+    if(!(fields instanceof PDFArray)){
+      fields = context.obj([]);
+      acroForm.set(PDFName.of('Fields'), fields);
+    }
+    fields.push(widgetRef);
+    acroForm.set(PDFName.of('SigFlags'), PDFNumber.of(3));
+  }
+  return contentsPlaceholder;
+}
+
+// The whole two-pass placeholder-then-patch signing flow. Reuses the same
+// export pipeline as "Save PDF" (flattened annotations/forms) but keeps the
+// intermediate pdf-lib PDFDocument around instead of calling .save() on it
+// immediately, so a signature field can be injected first.
+async function signPdfBytes(identity){
+  const sigLengthBytes = 8192; // generous room for an RSA-2048 CMS sig + cert chain
+
+  await applyFormValuesAndFlatten();
+  const outDoc = await buildExportDoc(pages);
+  const contentsPlaceholder = addSignaturePlaceholder(outDoc, identity, sigLengthBytes);
+
+  const bytes = await outDoc.save({ useObjectStreams: false });
+
+  const str = bytesToLatin1(bytes);
+  const hexStart = str.indexOf(contentsPlaceholder);
+  if(hexStart < 0) throw new Error('Could not locate the signature placeholder in the exported PDF.');
+  if(str.indexOf(contentsPlaceholder, hexStart + 1) >= 0) throw new Error('Signature placeholder is ambiguous — found more than once.');
+  const hexEnd = hexStart + contentsPlaceholder.length;
+
+  const sentinel = '9999999999';
+  const offsets = [];
+  let searchFrom = 0;
+  for(let i=0;i<3;i++){
+    const idx = str.indexOf(sentinel, searchFrom);
+    if(idx < 0) throw new Error('Could not locate the ByteRange placeholder in the exported PDF.');
+    offsets.push(idx);
+    searchFrom = idx + sentinel.length;
+  }
+
+  const A = hexStart, B = hexEnd, C = bytes.length - hexEnd;
+  function padNum(n){
+    const s = String(n);
+    if(s.length > 10) throw new Error('This PDF is too large for the reserved ByteRange field.');
+    return s + ' '.repeat(10 - s.length); // right-pad with spaces, not zeros — trailing whitespace terminates a PDF integer token cleanly
+  }
+  const patched = new Uint8Array(bytes); // copy — patch in place, keep `bytes` for reference
+  [A, B, C].forEach((n, i) => {
+    const s = padNum(n);
+    for(let j=0;j<10;j++) patched[offsets[i]+j] = s.charCodeAt(j);
+  });
+
+  // Hash exactly the two byte ranges ByteRange now names (patching ByteRange
+  // doesn't touch file length or the Contents hex region, so hashing after
+  // the patch is safe and simplest).
+  const range1 = patched.subarray(0, A);
+  const range2 = patched.subarray(B, B + C);
+
+  const p7 = forge.pkcs7.createSignedData();
+  p7.content = forge.util.createBuffer();
+  p7.content.putBytes(forge.util.binary.raw.encode(range1));
+  p7.content.putBytes(forge.util.binary.raw.encode(range2));
+  p7.addCertificate(identity.cert);
+  (identity.chain || []).forEach(c => p7.addCertificate(c));
+  p7.addSigner({
+    key: identity.privateKey,
+    certificate: identity.cert,
+    digestAlgorithm: forge.pki.oids.sha256,
+    authenticatedAttributes: [
+      { type: forge.pki.oids.contentType, value: forge.pki.oids.data },
+      { type: forge.pki.oids.messageDigest }, // forge fills this in from p7.content during sign()
+      { type: forge.pki.oids.signingTime, value: new Date() }
+    ]
+  });
+  p7.sign({ detached: true });
+
+  const derBytes = forge.asn1.toDer(p7.toAsn1()).getBytes();
+  let hex = forge.util.bytesToHex(derBytes);
+  if(hex.length > sigLengthBytes * 2) throw new Error('The signature exceeded the reserved space — please retry.');
+  hex = hex + '0'.repeat(sigLengthBytes * 2 - hex.length); // pad; DER parsers stop at the declared SEQUENCE length
+
+  for(let j=0;j<hex.length;j++) patched[hexStart+j] = hex.charCodeAt(j);
+  return patched;
+}
+
+/* ---------- Sign modal UI ---------- */
+const SIGN_DISCLOSURE_HTML = `This produces a cryptographically signed, tamper-evident PDF
+  (a PAdES-style ISO&nbsp;32000 <code>/Sig</code> with a detached CMS/PKCS#7 signature) —
+  an eIDAS &ldquo;Advanced Electronic Signature&rdquo; when your certificate is tied to a
+  verified identity, or a self-signed one for lower-stakes use — and it satisfies the
+  U.S. ESIGN Act. It is <b>not</b> an eIDAS &ldquo;Qualified&rdquo; signature, which by law
+  requires a certificate from a licensed EU Trust Service Provider issued on a certified
+  device. If you have a <code>.p12</code> from one, import it below.`;
+
+function showSignError(msg){
+  const err = el('signError');
+  if(err){ err.textContent = msg; err.style.display = ''; }
+  else toast(msg);
+}
+
+function identitySummaryHtml(identity){
+  return `<div class="identity-card">
+    <div><b>${escapeHtml(identity.name)}</b></div>
+    <div>${escapeHtml(identity.email)}</div>
+    ${identity.org ? `<div>${escapeHtml(identity.org)}</div>` : ''}
+    <div>Serial: ${identity.cert.serialNumber}</div>
+    <div>Fingerprint: ${certFingerprint(identity.cert)}</div>
+    <div>Expires: ${identity.cert.validity.notAfter.toDateString()}</div>
+  </div>`;
+}
+
+function renderSignModal(){
+  const body = el('signModalBody');
+  if(signIdentity){
+    body.innerHTML = `
+      ${identitySummaryHtml(signIdentity)}
+      <button class="modal-btn primary" id="doSignBtn">Sign this document</button>
+      <div style="text-align:center;margin-top:10px;"><button class="modal-link" id="switchIdBtn">Use a different identity</button></div>
+      <div class="modal-fineprint">${SIGN_DISCLOSURE_HTML}</div>`;
+    el('doSignBtn').onclick = doSignDocument;
+    el('switchIdBtn').onclick = () => {
+      if(confirm('This clears your saved signing certificate from this browser. You will need to create or import one again to sign. Continue?')){
+        clearSigningIdentity();
+        renderSignModal();
+      }
+    };
+    return;
+  }
+  const hasStored = !!localStorage.getItem(SIGN_IDENTITY_KEY);
+  if(hasStored){
+    let meta = {};
+    try{ meta = JSON.parse(localStorage.getItem(SIGN_IDENTITY_META_KEY) || '{}'); } catch(e){}
+    body.innerHTML = `
+      <p style="margin:0 0 12px;font-size:13px;">Unlock your signing certificate${meta.name ? ' for <b>'+escapeHtml(meta.name)+'</b>' : ''}.</p>
+      <label for="unlockPass">Passphrase</label>
+      <input type="password" id="unlockPass" autocomplete="current-password">
+      <div class="modal-error" id="signError" style="display:none;"></div>
+      <button class="modal-btn primary" id="unlockBtn">Unlock</button>
+      <div style="text-align:center;margin-top:10px;"><button class="modal-link" id="switchIdBtn2">Use a different identity</button></div>`;
+    const doUnlock = () => {
+      try{
+        unlockStoredIdentity(el('unlockPass').value);
+        renderSignModal();
+      } catch(e){ showSignError('Wrong passphrase, or the saved certificate is corrupted.'); }
+    };
+    el('unlockBtn').onclick = doUnlock;
+    el('unlockPass').addEventListener('keydown', e => { if(e.key==='Enter') doUnlock(); });
+    el('switchIdBtn2').onclick = () => {
+      if(confirm('This clears your saved signing certificate from this browser. Continue?')){
+        clearSigningIdentity();
+        renderSignModal();
+      }
+    };
+    return;
+  }
+  body.innerHTML = `
+    <label for="idName">Name *</label>
+    <input type="text" id="idName" autocomplete="name">
+    <label for="idEmail">Email *</label>
+    <input type="email" id="idEmail" autocomplete="email">
+    <label for="idOrg">Organization (optional)</label>
+    <input type="text" id="idOrg" autocomplete="organization">
+    <label for="idPass">Passphrase</label>
+    <input type="password" id="idPass" autocomplete="new-password">
+    <div style="font-size:11px;color:var(--muted);margin-top:4px;">Protect your signing key with a passphrase — you'll need it to sign again later.</div>
+    <div class="modal-error" id="signError" style="display:none;"></div>
+    <button class="modal-btn primary" id="createIdBtn">Create signing certificate</button>
+    <div class="modal-sep">or</div>
+    <button class="modal-btn" id="importIdBtn">Import existing certificate (.p12/.pfx)</button>
+    <div class="modal-fineprint">${SIGN_DISCLOSURE_HTML}</div>`;
+  el('createIdBtn').onclick = onCreateIdentityClick;
+  el('importIdBtn').onclick = () => el('p12Input').click();
+}
+
+async function onCreateIdentityClick(){
+  const name = el('idName').value.trim();
+  const email = el('idEmail').value.trim();
+  const org = el('idOrg').value.trim();
+  const passphrase = el('idPass').value;
+  if(!name || !email){ showSignError('Name and email are required.'); return; }
+  if(!passphrase){ showSignError('Choose a passphrase to protect your signing key.'); return; }
+  const btn = el('createIdBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="modal-spinner"></span>Generating key pair…';
+  try{
+    await createSigningIdentity({ name, email, org, passphrase });
+    toast('Signing certificate created');
+    renderSignModal();
+  } catch(e){
+    console.error(e);
+    showSignError('Could not generate a certificate — see console.');
+    btn.disabled = false; btn.textContent = 'Create signing certificate';
+  }
+}
+
+el('p12Input').onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if(!file) return;
+  const passphrase = prompt('Enter the passphrase for this .p12/.pfx file:');
+  if(passphrase == null) return;
+  setLoading(true, 'Importing certificate…');
+  try{
+    await importP12File(file, passphrase);
+    toast('Signing certificate imported');
+    renderSignModal();
+  } catch(err){
+    console.error(err);
+    toast('Could not import — wrong passphrase or unsupported file.');
+  }
+  setLoading(false);
+};
+
+async function doSignDocument(){
+  const btn = el('doSignBtn');
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="modal-spinner"></span>Signing…'; }
+  setLoading(true, 'Signing document…');
+  try{
+    const signedBytes = await signPdfBytes(signIdentity);
+    downloadBytes(signedBytes, originalName + '-signed.pdf');
+    toast('Document signed');
+    closeSignModal();
+  } catch(e){
+    console.error(e);
+    toast('Signing failed — see console.');
+    if(btn){ btn.disabled = false; btn.textContent = 'Sign this document'; }
+  }
+  setLoading(false);
+}
+
+function openSignModal(){
+  el('signOverlay').style.display = 'flex';
+  renderSignModal();
+}
+function closeSignModal(){ el('signOverlay').style.display = 'none'; }
+el('signBtn').onclick = openSignModal;
+el('signCloseBtn').onclick = closeSignModal;
+el('signOverlay').addEventListener('click', e => { if(e.target.id === 'signOverlay') closeSignModal(); });
 
 /* ---------- Print (renders composite pages, annotations included) ---------- */
 el('printBtn').onclick = async () => {

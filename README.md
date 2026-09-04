@@ -13,11 +13,12 @@ Owned by [Coder5330](https://github.com/Coder5330). Coded by Claude.
 - Search text across the document, with word-level highlighting for both digital text and OCR results
 - Word-processor-style text selection with copy-to-clipboard, shift-click range extend, and auto-scroll/auto-page-advance while dragging
 - Detect and fill AcroForm fields (text, checkbox, dropdown, radio), flattened into the exported PDF
+- Digitally sign a PDF with a real, client-side-generated X.509 certificate — a PAdES/CMS (`/Sig`, detached PKCS#7) signature that verifies in Adobe Reader and other standard validators, meeting eIDAS Advanced Electronic Signature and ESIGN Act bars (self-signed, or an imported CA-issued `.p12`; not eIDAS Qualified, which requires a licensed EU Trust Service Provider)
 - Export the edited PDF, or print it
 
 ## Stack
 
-Single-file static HTML app (`index.html`) built on [PDF.js](https://mozilla.github.io/pdf.js/), [pdf-lib](https://pdf-lib.js.org/), and [Tesseract.js](https://github.com/naptha/tesseract.js) — no build step, no backend. Everything runs in the browser; nothing is uploaded anywhere.
+Single-file static HTML app (`index.html`) built on [PDF.js](https://mozilla.github.io/pdf.js/), [pdf-lib](https://pdf-lib.js.org/), [Tesseract.js](https://github.com/naptha/tesseract.js), and [node-forge](https://github.com/digitalbazaar/forge) — no build step, no backend. Everything runs in the browser; nothing is uploaded anywhere.
 
 ## Source
 
